@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+# cage - Claude Agent CLI
+# Background Claude session management
+
+# Resolve CAGE_ROOT (parent of bin/)
+CAGE_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+
+# Check for GNU getopt (returns exit code 4 when enhanced getopt is present)
+getopt -T >/dev/null 2>&1
+if [ $? -ne 4 ]; then
+    echo "Error: GNU getopt is required but not found."
+    echo "On macOS: brew install gnu-getopt && export PATH=\"/usr/local/opt/gnu-getopt/bin:\$PATH\""
+    exit 1
+fi
+
+# Source helpers (always needed)
+source "$CAGE_ROOT/lib/helpers.sh"
+
+cage_main() {
+    local cmd="$1"
+    shift 2>/dev/null
+
+    case "$cmd" in
+        new)
+            source "$CAGE_ROOT/lib/new.sh"
+            cage_new "$@"
+            ;;
+        resume)
+            source "$CAGE_ROOT/lib/resume.sh"
+            cage_resume "$@"
+            ;;
+        status)
+            source "$CAGE_ROOT/lib/status.sh"
+            cage_status "$@"
+            ;;
+        result)
+            source "$CAGE_ROOT/lib/result.sh"
+            cage_result "$@"
+            ;;
+        tail)
+            source "$CAGE_ROOT/lib/tail.sh"
+            cage_tail "$@"
+            ;;
+        meta)
+            source "$CAGE_ROOT/lib/meta.sh"
+            cage_meta "$@"
+            ;;
+        kill)
+            source "$CAGE_ROOT/lib/kill.sh"
+            cage_kill "$@"
+            ;;
+        help|-h|--help|"")
+            cat <<'EOF'
+cage - Claude Agent CLI
+
+Usage: cage <command> [options]
+
+Commands:
+  new      Start new background session
+  resume   Resume existing session (interactive or with -p)
+  status   List sessions
+  result   Read session result JSON
+  tail     Tail session log
+  meta     Read session metadata
+  kill     Kill running session
+
+Run 'cage <command> --help' for command-specific help.
+EOF
+            ;;
+        *)
+            echo "Unknown command: $cmd"
+            echo "Run 'cage help' for usage."
+            return 1
+            ;;
+    esac
+}
+
+cage_main "$@"
