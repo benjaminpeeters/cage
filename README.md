@@ -96,7 +96,7 @@ Sessions are stored in `/tmp/cage_YYYY-MM-DD/`:
 - GNU getopt (for argument parsing)
 - jq
 - uuidgen
-- Claude CLI (`~/.claude/local/claude`)
+- Claude CLI (`claude` in PATH)
 
 ### macOS Setup
 

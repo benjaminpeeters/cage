@@ -172,7 +172,7 @@ MD_MODE="${10}"
 
 # Run Claude and capture output
 if [ "$MD_MODE" = "true" ]; then
-    ~/.claude/local/claude -p "$TASK" \
+    claude -p "$TASK" \
         --session-id "$UUID" \
         --model "$MODEL" \
         --allowedTools "$TOOLS" \
@@ -181,7 +181,7 @@ if [ "$MD_MODE" = "true" ]; then
     # For markdown mode, copy log content to result (minus header)
     tail -n +8 "$LOG_FILE" | head -n -3 > "${RESULT_FILE%.json}.md" 2>/dev/null
 else
-    OUTPUT=$(~/.claude/local/claude -p "$TASK" \
+    OUTPUT=$(claude -p "$TASK" \
         --session-id "$UUID" \
         --model "$MODEL" \
         --allowedTools "$TOOLS" \

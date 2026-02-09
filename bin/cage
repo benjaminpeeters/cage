@@ -50,6 +50,10 @@ cage_main() {
             source "$CAGE_ROOT/lib/kill.sh"
             cage_kill "$@"
             ;;
+        check)
+            source "$CAGE_ROOT/lib/check.sh"
+            cage_check "$@"
+            ;;
         help|-h|--help|"")
             cat <<'EOF'
 cage - Claude Agent CLI
@@ -64,6 +68,7 @@ Commands:
   tail     Tail session log
   meta     Read session metadata
   kill     Kill running session
+  check    Open session log in nvim
 
 Run 'cage <command> --help' for command-specific help.
 EOF

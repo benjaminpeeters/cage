@@ -81,7 +81,7 @@ cage_resume() {
             echo -e "${CYAN}Original task:${NC} ${task:0:80}..."
             echo ""
         fi
-        ~/.claude/local/claude --resume "$uuid"
+        claude --resume "$uuid"
         return
     fi
 
@@ -149,7 +149,7 @@ PID_FILE="$pid_file"
     echo "---"
 } > "\$LOG_FILE"
 
-OUTPUT=\$(~/.claude/local/claude -p "$prompt" \\
+OUTPUT=\$(claude -p "$prompt" \\
     --resume "$uuid" \\
     $fork_flag \\
     --model opus \\
