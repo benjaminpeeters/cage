@@ -1,0 +1,8 @@
+{
+  "description": "All tools with opus model (project cwd)",
+  "model": "opus",
+  "tools": "Bash,Write,Read,Edit,Glob,Grep,WebSearch,WebFetch,TodoWrite",
+  "output": "json",
+  "cwd": ".",
+  "system_prompt": "Complete complex multi-step tasks thoroughly."
+}

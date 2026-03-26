@@ -54,6 +54,10 @@ cage_main() {
             source "$CAGE_ROOT/lib/check.sh"
             cage_check "$@"
             ;;
+        profile)
+            source "$CAGE_ROOT/lib/profile.sh"
+            cage_profile "$@"
+            ;;
         help|-h|--help|"")
             cat <<'EOF'
 cage - Claude Agent CLI
@@ -61,7 +65,7 @@ cage - Claude Agent CLI
 Usage: cage <command> [options]
 
 Commands:
-  new      Start new background session
+  new      Start new session (background with -p)
   resume   Resume existing session (interactive or with -p)
   status   List sessions
   result   Read session result JSON
@@ -69,6 +73,7 @@ Commands:
   meta     Read session metadata
   kill     Kill running session
   check    Open session log in nvim
+  profile  List, show, edit, or create profiles
 
 Run 'cage <command> --help' for command-specific help.
 EOF

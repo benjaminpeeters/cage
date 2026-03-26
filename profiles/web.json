@@ -1,0 +1,8 @@
+{
+  "description": "Online research",
+  "model": "opus",
+  "tools": "Read,Glob,Grep,WebSearch,WebFetch",
+  "output": "markdown",
+  "cwd": "/tmp/cage",
+  "system_prompt": "Search online for current information. Cite sources."
+}

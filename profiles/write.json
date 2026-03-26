@@ -1,0 +1,8 @@
+{
+  "description": "Code modification",
+  "model": "opus",
+  "tools": "Read,Write,Edit,Glob,Grep,Bash",
+  "output": "json",
+  "cwd": ".",
+  "system_prompt": "Write clean, minimal code. Follow existing patterns."
+}

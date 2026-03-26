@@ -1,0 +1,8 @@
+{
+  "description": "Read-only codebase exploration",
+  "model": "opus",
+  "tools": "Glob,Grep,Read,Bash(ls:*),Bash(find:*),Bash(tree:*)",
+  "output": "markdown",
+  "cwd": ".",
+  "system_prompt": "Focus on finding and listing relevant files and code patterns."
+}

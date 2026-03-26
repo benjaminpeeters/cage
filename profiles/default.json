@@ -1,0 +1,8 @@
+{
+  "description": "General purpose tools",
+  "model": "sonnet",
+  "tools": "Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch,TodoWrite",
+  "output": "markdown",
+  "cwd": "/tmp/cage",
+  "system_prompt": ""
+}

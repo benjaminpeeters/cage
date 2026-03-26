@@ -72,27 +72,41 @@ cage_resume() {
     # Mode 1: Interactive (no prompt)
     if [ -z "$prompt" ]; then
         local meta_file=$(cage_get_session_file "$session" "meta.json")
+        local task="" profile="" orig_cwd=""
         if [ -f "$meta_file" ]; then
-            local task=$(jq -r '.task' "$meta_file" 2>/dev/null)
-            local profile=$(jq -r '.profile' "$meta_file" 2>/dev/null)
+            eval "$(jq -r '
+                "task=" + (.task // "" | @sh) + " " +
+                "profile=" + (.profile // "" | @sh) + " " +
+                "orig_cwd=" + (.cwd // "" | @sh)
+            ' "$meta_file" 2>/dev/null)"
             echo -e "${CYAN}Resuming session:${NC} $session"
             echo -e "${CYAN}UUID:${NC} $uuid"
             echo -e "${CYAN}Profile:${NC} $profile"
+            [ -n "$orig_cwd" ] && echo -e "${CYAN}CWD:${NC} $orig_cwd"
             echo -e "${CYAN}Original task:${NC} ${task:0:80}..."
             echo ""
         fi
-        claude --resume "$uuid"
+        if [ -n "$orig_cwd" ] && [ -d "$orig_cwd" ]; then
+            (cd "$orig_cwd" && claude --resume "$uuid")
+        else
+            claude --resume "$uuid"
+        fi
+        echo -e "${CYAN}Resume with:${NC} cage resume ${session}"
         return
     fi
 
     # Mode 2: Non-interactive with prompt
     local meta_file=$(cage_get_session_file "$session" "meta.json")
-    local orig_profile=$(jq -r '.profile // "default"' "$meta_file" 2>/dev/null)
-    local orig_tools=$(jq -r '.tools // "Bash,Write,Read,Edit,Glob,Grep"' "$meta_file" 2>/dev/null)
+    local orig_profile orig_tools orig_model
+    eval "$(jq -r '
+        "orig_profile=" + (.profile // "default" | @sh) + " " +
+        "orig_tools=" + (.tools // "Bash,Write,Read,Edit,Glob,Grep" | @sh) + " " +
+        "orig_model=" + (.model // "sonnet" | @sh)
+    ' "$meta_file" 2>/dev/null)"
 
     # Create new session for tracking
     local day=$(date +%Y-%m-%d)
-    local log_dir="${CAGE_STORAGE}/cage_${day}"
+    local log_dir="${CAGE_STORAGE}/${day}"
     mkdir -p "$log_dir"
 
     local session_num=$(cage_next_session_num)
@@ -114,20 +128,21 @@ cage_resume() {
     if [ "$md_mode" = true ]; then
         output_flags="--output-format text"
     else
-        output_flags='--output-format json --json-schema {"type":"object","properties":{"status":{"type":"string","enum":["success","error","partial"]},"summary":{"type":"string"},"files_created":{"type":"array","items":{"type":"string"}},"files_modified":{"type":"array","items":{"type":"string"}},"files_read":{"type":"array","items":{"type":"string"}},"errors":{"type":"array","items":{"type":"string"}},"data":{"type":"object"},"next_steps":{"type":"array","items":{"type":"string"}}},"required":["status","summary"]}'
+        output_flags="$CAGE_JSON_OUTPUT_FLAGS"
     fi
 
     # Store metadata
     jq -n \
         --arg uuid "$new_uuid" \
+        --arg name "$new_session" \
         --arg profile "$orig_profile" \
         --arg task "$prompt" \
         --arg start_time "$(date -Iseconds)" \
-        --arg model "opus" \
+        --arg model "$orig_model" \
         --arg tools "$orig_tools" \
         --arg parent_session "$session" \
         --arg parent_uuid "$uuid" \
-        '{uuid: $uuid, profile: $profile, task: $task, start_time: $start_time, model: $model, tools: $tools, parent_session: $parent_session, parent_uuid: $parent_uuid}' \
+        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, tools: $tools, parent_session: $parent_session, parent_uuid: $parent_uuid}' \
         > "$new_meta_file"
 
     # Create wrapper script
@@ -151,8 +166,9 @@ PID_FILE="$pid_file"
 
 OUTPUT=\$(claude -p "$prompt" \\
     --resume "$uuid" \\
+    --name "$new_session" \\
     $fork_flag \\
-    --model opus \\
+    --model "$orig_model" \\
     --allowedTools "$orig_tools" \\
     $output_flags 2>&1)
 EXIT_CODE=\$?
@@ -192,8 +208,6 @@ WRAPPER_EOF
 
     if [ "$tail_mode" = true ]; then
         echo ""
-        echo -e "${DIM}Launching tail mode in 2s...${NC}"
-        sleep 2
         source "$CAGE_ROOT/lib/tail.sh"
         cage_tail "$new_session_id"
     fi

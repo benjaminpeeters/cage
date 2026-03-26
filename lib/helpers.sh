@@ -15,10 +15,13 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 
 # Session storage location
-CAGE_STORAGE="/tmp"
+CAGE_STORAGE="/tmp/cage"
+
+# JSON output schema for background sessions
+CAGE_JSON_OUTPUT_FLAGS='--output-format json --json-schema {"type":"object","properties":{"status":{"type":"string","enum":["success","error","partial"]},"summary":{"type":"string"},"files_created":{"type":"array","items":{"type":"string"}},"files_modified":{"type":"array","items":{"type":"string"}},"files_read":{"type":"array","items":{"type":"string"}},"errors":{"type":"array","items":{"type":"string"}},"data":{"type":"object"},"next_steps":{"type":"array","items":{"type":"string"}}},"required":["status","summary"]}'
 
 # Parse session ID and return full path to a session file
-# Usage: cage_get_session_file "S0_1" "result.json" -> /tmp/cage_2026-01-05/cage_1.result.json
+# Usage: cage_get_session_file "S0_1" "result.json" -> /tmp/cage/2026-01-05/cage_1.result.json
 cage_get_session_file() {
     local session="$1"
     local file_type="$2"  # log, pid, status, meta.json, result.json
@@ -39,6 +42,21 @@ cage_get_session_file() {
         local session_ts=$(date -d "${session_date}" +%s 2>/dev/null)
         local today_ts=$(date +%s)
         days_ago=$(( (today_ts - session_ts) / 86400 ))
+    # UUID format: search meta.json files for matching uuid
+    elif [[ $session =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        local meta_file
+        meta_file=$(grep -l "\"uuid\": \"$session\"" "${CAGE_STORAGE}"/*/*.meta.json 2>/dev/null | head -1)
+        if [ -z "$meta_file" ]; then
+            echo "No session found for UUID: $session" >&2
+            return 1
+        fi
+        # Extract date and number from meta file path
+        local base=$(basename "$meta_file" .meta.json)
+        session_num=${base#cage_}
+        local dir_date=$(basename "$(dirname "$meta_file")")
+        local session_ts=$(date -d "${dir_date}" +%s 2>/dev/null)
+        local today_ts=$(date +%s)
+        days_ago=$(( (today_ts - session_ts) / 86400 ))
     else
         echo "Invalid session ID format: $session" >&2
         return 1
@@ -48,7 +66,7 @@ cage_get_session_file() {
     local target_date=$(date -d "$today - $days_ago days" +%Y-%m-%d)
 
     # Build file path
-    local log_dir="${CAGE_STORAGE}/cage_${target_date}"
+    local log_dir="${CAGE_STORAGE}/${target_date}"
     local base_path="${log_dir}/cage_${session_num}"
 
     case "$file_type" in
@@ -76,12 +94,12 @@ cage_resolve_uuid() {
 }
 
 # Get session log directory for a given date offset
-# Usage: cage_get_log_dir 0 -> /tmp/cage_2026-01-05 (today)
+# Usage: cage_get_log_dir 0 -> /tmp/cage/2026-01-05 (today)
 cage_get_log_dir() {
     local days_ago="${1:-0}"
     local today=$(date +%Y-%m-%d)
     local target_date=$(date -d "$today - $days_ago days" +%Y-%m-%d)
-    echo "${CAGE_STORAGE}/cage_${target_date}"
+    echo "${CAGE_STORAGE}/${target_date}"
 }
 
 # Get next available session number for today
@@ -91,7 +109,7 @@ cage_next_session_num() {
     mkdir -p "$log_dir"
 
     local session_num=1
-    while [ -f "${log_dir}/cage_${session_num}.log" ] || [ -f "${log_dir}/cage_${session_num}.pid" ]; do
+    while [ -f "${log_dir}/cage_${session_num}.log" ] || [ -f "${log_dir}/cage_${session_num}.pid" ] || [ -f "${log_dir}/cage_${session_num}.meta.json" ]; do
         ((session_num++))
     done
     echo "$session_num"

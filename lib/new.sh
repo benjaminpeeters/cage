@@ -1,53 +1,74 @@
 #!/usr/bin/env bash
 
-# new.sh - Start a new background Claude session
-# Usage: cage new [options] "task"
+# new.sh - Start a new Claude session
+# Usage: cage new [options] [profile] "task"
 
 _cage_new_help() {
+    # Dynamic help: list profiles from files
     cat <<'EOF'
-cage new - Start a new background Claude session
+cage new - Start a new Claude session
 
-Usage: cage new [options] "task"
+Usage: cage new [options] [profile] "task"
+
+By default, starts an interactive foreground session.
+With -p, runs non-interactively in the background.
 
 Options:
-  -t, --tail           Automatically tail the log after starting
-  -m, --md             Output in markdown (default: JSON for inter-agent use)
-  -p, --profile NAME   Tool preset: explore|write|research|full|default
-  --result-file PATH   Custom path for result JSON
+  -p, --print          Non-interactive background mode (like claude -p)
+  -m, --model MODEL    Model override (opus, sonnet, haiku)
+  -t, --tail           Tail the log after starting (only with -p)
+  --md                 Force markdown output (only with -p)
+  --json               Force JSON output (only with -p)
+  --result-file PATH   Custom path for result JSON (only with -p)
   -h, --help           Show this help
 
-Profiles:
-  explore   Codebase exploration (Glob, Grep, Read, limited Bash)
-  write     Code writing (Read, Write, Edit, Glob, Grep, Bash)
-  research  Online research (Read, Glob, Grep, WebSearch, WebFetch)
-  full      All tools including TodoWrite
-  default   General purpose tools
+EOF
+    echo "Profiles (positional, before the task):"
+    source "$CAGE_ROOT/lib/profile.sh"
+    for f in "$CAGE_PROFILES_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        local name=$(basename "$f" .json)
+        local desc="" model="" output="" tools=""
+        eval "$(jq -r '"desc=" + (.description // "" | @sh) + " model=" + (.model // "" | @sh) + " output=" + (.output // "" | @sh) + " tools=" + (.tools // "" | @sh)' "$f")"
+        printf "  %-10s %s [%s, %s]\n" "$name" "$desc" "$model" "$output"
+        printf "             %s\n" "$tools"
+    done
+    cat <<'EOF'
+
+Model can be overridden with -m: cage new -m opus fast "task"
+See 'cage profile' for full profile management.
 
 Examples:
   cage new "Fix the bug in auth.py"
-  cage new -p research "What are best practices for X?"
-  cage new -mt "Explain this codebase"
+  cage new fast "Quick question about this code"
+  cage new explore "Map out the auth module"
+  cage new -p web "What are best practices for X?"
+  cage new -m opus "Complex refactoring task"
+  cage new -pt "Explain this codebase"
 EOF
 }
 
 cage_new() {
+    local print_mode=false
     local tail_mode=false
-    local md_mode=false
-    local profile="default"
+    local output_override=""
+    local model_override=""
     local result_file=""
 
     # Parse options with GNU getopt
     local opts
-    opts=$(getopt -o tmp:h \
-                  --long tail,md,profile:,result-file:,help \
+    opts=$(getopt -o ptm:h \
+                  --long print,tail,model:,md,json,result-file:,help \
                   -n 'cage new' -- "$@") || return 1
     eval set -- "$opts"
 
     while true; do
         case "$1" in
+            -p|--print) print_mode=true; shift ;;
             -t|--tail) tail_mode=true; shift ;;
-            -m|--md) md_mode=true; shift ;;
-            -p|--profile) profile="$2"; shift 2 ;;
+            -m|--model) model_override="$2"; shift 2 ;;
+            --md) output_override="markdown"; shift ;;
+            --json) output_override="json"; shift ;;
             --result-file) result_file="$2"; shift 2 ;;
             -h|--help) _cage_new_help; return 0 ;;
             --) shift; break ;;
@@ -55,50 +76,43 @@ cage_new() {
         esac
     done
 
-    local task="$*"
+    # Load profile module
+    source "$CAGE_ROOT/lib/profile.sh"
 
-    if [ -z "$task" ]; then
-        echo "Error: No task provided"
-        echo "Usage: cage new [options] \"task\""
-        return 1
+    # Check if first positional arg is a profile name
+    local profile="default"
+    if [ $# -ge 1 ]; then
+        if [ -f "$CAGE_PROFILES_DIR/${1}.json" ]; then
+            profile="$1"
+            shift
+        fi
     fi
+
+    local task="$*"
+    cage_load_profile "$profile" || return 1
+
+    local tools="$PROF_TOOLS"
+    local model="$PROF_MODEL"
+    local sys_prompt="$PROF_SYSTEM_PROMPT"
+    local output_format="$PROF_OUTPUT"
+    local work_dir="$PROF_CWD"
+
+    # Resolve working directory ("." means caller's cwd)
+    if [ "$work_dir" = "." ]; then
+        work_dir="$(pwd)"
+    fi
+    mkdir -p "$work_dir"
+
+    # Overrides take precedence
+    [ -n "$model_override" ] && model="$model_override"
+    [ -n "$output_override" ] && output_format="$output_override"
 
     # Generate UUID for session tracking
     local uuid=$(uuidgen)
 
-    # Profile definitions: tools, model, system prompt
-    local tools model sys_prompt
-    case $profile in
-        explore)
-            tools="Glob,Grep,Read,Bash(ls:*),Bash(find:*),Bash(tree:*)"
-            model="opus"
-            sys_prompt="Focus on finding and listing relevant files and code patterns."
-            ;;
-        write)
-            tools="Read,Write,Edit,Glob,Grep,Bash"
-            model="opus"
-            sys_prompt="Write clean, minimal code. Follow existing patterns."
-            ;;
-        research)
-            tools="Read,Glob,Grep,WebSearch,WebFetch"
-            model="opus"
-            sys_prompt="Search online for current information. Cite sources."
-            ;;
-        full)
-            tools="Bash,Write,Read,Edit,Glob,Grep,WebSearch,WebFetch,TodoWrite"
-            model="opus"
-            sys_prompt="Complete complex multi-step tasks thoroughly."
-            ;;
-        *)  # default
-            tools="Bash,Write,Read,Edit,Glob,Grep"
-            model="opus"
-            sys_prompt=""
-            ;;
-    esac
-
     # Create organized log directory structure
     local day=$(date +%Y-%m-%d)
-    local log_dir="${CAGE_STORAGE}/cage_${day}"
+    local log_dir="${CAGE_STORAGE}/${day}"
     mkdir -p "$log_dir"
 
     # Find next session number for today
@@ -113,6 +127,34 @@ cage_new() {
 
     # Set default result file if not specified
     [ -z "$result_file" ] && result_file="${log_dir}/cage_${session_num}.result.json"
+
+    # Store metadata as JSON before running
+    jq -n \
+        --arg uuid "$uuid" \
+        --arg name "$session_name" \
+        --arg profile "$profile" \
+        --arg task "$task" \
+        --arg start_time "$(date -Iseconds)" \
+        --arg model "$model" \
+        --arg tools "$tools" \
+        --arg output "$output_format" \
+        --arg cwd "$work_dir" \
+        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, tools: $tools, output: $output, cwd: $cwd}' \
+        > "$meta_file"
+
+    # Mode 1: Interactive (default)
+    if [ "$print_mode" = false ]; then
+        echo -e "${GREEN}✓${NC} Session: ${BOLD}$session_name${NC} (${session_id})"
+        echo -e "${GREEN}✓${NC} Profile: ${PURPLE}$profile${NC}  Model: ${CYAN}$model${NC}  CWD: ${CYAN}$work_dir${NC}"
+        echo ""
+        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --allowedTools "$tools" ${task:+"$task"})
+        echo -e "${CYAN}Resume with:${NC} cage resume ${session_id}"
+        return
+    fi
+
+    # Mode 2: Non-interactive background (with -p)
+    local md_mode=false
+    [ "$output_format" = "markdown" ] && md_mode=true
 
     # Build final task with system prompt
     local final_task="$task"
@@ -130,19 +172,8 @@ Use headers, lists, and code blocks as appropriate.
 By default, use the International System of Units."
         output_flags="--output-format text"
     else
-        output_flags='--output-format json --json-schema {"type":"object","properties":{"status":{"type":"string","enum":["success","error","partial"]},"summary":{"type":"string"},"files_created":{"type":"array","items":{"type":"string"}},"files_modified":{"type":"array","items":{"type":"string"}},"files_read":{"type":"array","items":{"type":"string"}},"errors":{"type":"array","items":{"type":"string"}},"data":{"type":"object"},"next_steps":{"type":"array","items":{"type":"string"}}},"required":["status","summary"]}'
+        output_flags="$CAGE_JSON_OUTPUT_FLAGS"
     fi
-
-    # Store metadata as JSON before running
-    jq -n \
-        --arg uuid "$uuid" \
-        --arg profile "$profile" \
-        --arg task "$task" \
-        --arg start_time "$(date -Iseconds)" \
-        --arg model "$model" \
-        --arg tools "$tools" \
-        '{uuid: $uuid, profile: $profile, task: $task, start_time: $start_time, model: $model, tools: $tools}' \
-        > "$meta_file"
 
     # Create wrapper script
     local wrapper_script="/tmp/cage_wrapper_${session_name}.sh"
@@ -158,6 +189,10 @@ OUTPUT_FLAGS="$7"
 UUID="$8"
 STATUS_FILE="$9"
 MD_MODE="${10}"
+SESSION_NAME="${11}"
+WORK_DIR="${12}"
+
+cd "$WORK_DIR" || exit 1
 
 # Add session info to log
 {
@@ -174,6 +209,7 @@ MD_MODE="${10}"
 if [ "$MD_MODE" = "true" ]; then
     claude -p "$TASK" \
         --session-id "$UUID" \
+        --name "$SESSION_NAME" \
         --model "$MODEL" \
         --allowedTools "$TOOLS" \
         --output-format text >> "$LOG_FILE" 2>&1
@@ -183,6 +219,7 @@ if [ "$MD_MODE" = "true" ]; then
 else
     OUTPUT=$(claude -p "$TASK" \
         --session-id "$UUID" \
+        --name "$SESSION_NAME" \
         --model "$MODEL" \
         --allowedTools "$TOOLS" \
         $OUTPUT_FLAGS 2>&1)
@@ -217,6 +254,8 @@ WRAPPER_EOF
         "$uuid" \
         "$status_file" \
         "$md_mode" \
+        "$session_name" \
+        "$work_dir" \
         < /dev/null > /dev/null 2>&1 &
 
     local pid=$!
@@ -227,7 +266,7 @@ WRAPPER_EOF
     echo -e "${GREEN}✓${NC} Started session: ${BOLD}$session_name${NC}"
     echo -e "${GREEN}✓${NC} PID: ${YELLOW}$pid${NC}"
     echo -e "${GREEN}✓${NC} UUID: ${CYAN}${uuid}${NC}"
-    echo -e "${GREEN}✓${NC} Profile: ${PURPLE}$profile${NC}"
+    echo -e "${GREEN}✓${NC} Profile: ${PURPLE}$profile${NC}  Model: ${CYAN}$model${NC}  Output: ${CYAN}$output_format${NC}"
     echo -e "${GREEN}✓${NC} Log: ${CYAN}$log_file${NC}"
     echo ""
     echo -e "${BOLD}Commands:${NC}"
@@ -240,8 +279,6 @@ WRAPPER_EOF
     # If tail mode is enabled, launch cage tail after a brief pause
     if [ "$tail_mode" = true ]; then
         echo ""
-        echo -e "${DIM}Launching tail mode in 2s...${NC}"
-        sleep 2
         source "$CAGE_ROOT/lib/tail.sh"
         cage_tail "$session_id"
     fi

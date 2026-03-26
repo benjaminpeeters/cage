@@ -29,7 +29,7 @@ EOF
         log_file=$(cage_get_session_file "$session" "log")
     else
         # Find most recent log across all cage directories
-        log_file=$(find "${CAGE_STORAGE}"/cage_* -maxdepth 1 -name "*.log" -printf '%T@\t%p\n' 2>/dev/null \
+        log_file=$(find "${CAGE_STORAGE}"/* -maxdepth 1 -name "*.log" -printf '%T@\t%p\n' 2>/dev/null \
             | sort -rn | head -1 | cut -f2)
     fi
 

@@ -1,6 +1,6 @@
 # cage - Claude Agent CLI
 
-Background Claude session management for inter-agent workflows.
+Claude session management for interactive and background workflows.
 
 ## Installation
 
@@ -14,27 +14,28 @@ cd ~/MEGA/repo/claude/cage
 ### Start a new session
 
 ```bash
-cage new "Fix the bug in auth.py"
-cage new -p research "What are best practices for X?"
-cage new -m "Explain this codebase"          # Markdown output
-cage new -t "Fix something"                   # With tail
-cage new -mt "Quick question"                 # Combined flags
+cage new "Fix the bug in auth.py"                # Interactive (default)
+cage new fast "Quick question"                    # With profile
+cage new -m opus "Complex task"                   # Override model
+cage new -p "Background task"                     # Background mode
+cage new -p web "What are best practices for X?"  # Background with profile
+cage new -pt "Fix something"                      # Background with tail
 ```
 
 ### Resume a session
 
 ```bash
 cage resume S0_3                              # Interactive
-cage resume S0_3 -p "Now add tests"           # Non-interactive
+cage resume S0_3 -p "Now add tests"           # Non-interactive background
 cage resume S0_3 -p "task" --fork             # Fork session
-cage resume S0_3 -p "task" -m                 # Markdown output
-cage resume S0_3 -p "task" -mt                # Combined flags
+cage resume S0_3 -p "task" --md               # Markdown output
 ```
 
 ### Session management
 
 ```bash
 cage status                                   # List sessions
+cage status S0_3                              # Show session details
 cage result S0_3                              # Read result JSON
 cage result S0_3 .summary                     # Read specific field
 cage tail S0_3                                # Tail log
@@ -42,15 +43,30 @@ cage meta S0_3                                # Read metadata
 cage kill S0_3                                # Kill session
 ```
 
+### Profile management
+
+```bash
+cage profile                                  # List profiles
+cage profile show web                         # Show profile details
+cage profile edit default                     # Interactive editor
+cage profile create custom                    # Create new profile
+cage profile delete custom                    # Delete profile
+```
+
 ## Profiles
 
-| Profile | Tools | Purpose |
-|---------|-------|---------|
-| explore | Glob, Grep, Read, limited Bash | Codebase exploration |
-| write | Read, Write, Edit, Glob, Grep, Bash | Code writing |
-| research | Read, Glob, Grep, WebSearch, WebFetch | Online research |
-| full | All tools + TodoWrite | Complex multi-step tasks |
-| default | Bash, Write, Read, Edit, Glob, Grep | General purpose |
+Profiles are JSON files in `profiles/` defining model, tools, output format, working directory, and system prompt.
+
+| Profile | Model | Tools | Output | CWD | Purpose |
+|---------|-------|-------|--------|-----|---------|
+| default | sonnet | All standard tools | markdown | /tmp/cage | General purpose |
+| fast | haiku | Basic tools | json | /tmp/cage | Lightweight, speed-optimized |
+| explore | opus | Glob, Grep, Read, limited Bash | markdown | . | Read-only codebase exploration |
+| write | opus | Read, Write, Edit, Glob, Grep, Bash | json | . | Code modification |
+| web | opus | Read, Glob, Grep, WebSearch, WebFetch | markdown | /tmp/cage | Online research |
+| full | opus | All tools + TodoWrite | json | . | All tools with project context |
+
+CWD `.` means the caller's working directory. `/tmp/cage` is an isolated directory.
 
 ## Session IDs
 
@@ -61,10 +77,13 @@ Sessions use the format `S<days_ago>_<number>`:
 
 Full format: `cage_YYYY-MM-DD_N`
 
+Sessions can also be referenced by UUID.
+
 ## Output Formats
 
-- Default: JSON with schema (for inter-agent communication)
-- `-m` flag: Markdown (human-readable)
+Output format is set by the profile (default: see table above):
+- `--md` flag: Force markdown output (background mode only)
+- `--json` flag: Force JSON output (background mode only)
 
 ## Result JSON Schema
 
@@ -83,7 +102,7 @@ Full format: `cage_YYYY-MM-DD_N`
 
 ## Storage
 
-Sessions are stored in `/tmp/cage_YYYY-MM-DD/`:
+Sessions are stored in `/tmp/cage/YYYY-MM-DD/`:
 - `cage_N.log` - Full output
 - `cage_N.pid` - PID while running
 - `cage_N.status` - Exit code
@@ -96,6 +115,7 @@ Sessions are stored in `/tmp/cage_YYYY-MM-DD/`:
 - GNU getopt (for argument parsing)
 - jq
 - uuidgen
+- gum (for interactive profile editor)
 - Claude CLI (`claude` in PATH)
 
 ### macOS Setup
