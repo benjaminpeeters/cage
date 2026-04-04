@@ -144,12 +144,17 @@ cage_new() {
 
     # Mode 1: Interactive (default)
     if [ "$print_mode" = false ]; then
-        echo -e "${GREEN}✓${NC} Session: ${BOLD}$session_name${NC} (${session_id})"
-        echo -e "${GREEN}✓${NC} Profile: ${PURPLE}$profile${NC}  Model: ${CYAN}$model${NC}  CWD: ${CYAN}$work_dir${NC}"
-        echo ""
+        cage_print_session_header "$session_name ($session_id)" "$profile" "$model" "$work_dir"
         (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --allowedTools "$tools" ${task:+"$task"})
-        echo -e "${CYAN}Resume with:${NC} cage resume ${session_id}"
-        return
+        local _exit_code=$?
+        if cage_has_conversation "$work_dir" "$uuid"; then
+            echo "$_exit_code" > "$status_file"
+            cage_print_resume_hint "$session_id"
+        else
+            rm -f "$meta_file" "$status_file"
+            echo -e "${DIM}Empty session removed.${NC}"
+        fi
+        return $_exit_code
     fi
 
     # Mode 2: Non-interactive background (with -p)

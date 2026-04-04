@@ -72,27 +72,35 @@ cage_resume() {
     # Mode 1: Interactive (no prompt)
     if [ -z "$prompt" ]; then
         local meta_file=$(cage_get_session_file "$session" "meta.json")
-        local task="" profile="" orig_cwd=""
+        local session_name="" profile="" orig_cwd="" orig_model=""
         if [ -f "$meta_file" ]; then
             eval "$(jq -r '
-                "task=" + (.task // "" | @sh) + " " +
+                "session_name=" + (.name // "" | @sh) + " " +
                 "profile=" + (.profile // "" | @sh) + " " +
-                "orig_cwd=" + (.cwd // "" | @sh)
+                "orig_cwd=" + (.cwd // "" | @sh) + " " +
+                "orig_model=" + (.model // "sonnet" | @sh)
             ' "$meta_file" 2>/dev/null)"
-            echo -e "${CYAN}Resuming session:${NC} $session"
-            echo -e "${CYAN}UUID:${NC} $uuid"
-            echo -e "${CYAN}Profile:${NC} $profile"
-            [ -n "$orig_cwd" ] && echo -e "${CYAN}CWD:${NC} $orig_cwd"
-            echo -e "${CYAN}Original task:${NC} ${task:0:80}..."
-            echo ""
-        fi
-        if [ -n "$orig_cwd" ] && [ -d "$orig_cwd" ]; then
-            (cd "$orig_cwd" && claude --resume "$uuid")
         else
-            claude --resume "$uuid"
+            echo -e "${YELLOW}Warning:${NC} metadata file missing for session $session"
         fi
-        echo -e "${CYAN}Resume with:${NC} cage resume ${session}"
-        return
+
+        local display
+        if [ -n "$session_name" ]; then display="$session_name ($session)"; else display="$session"; fi
+        cage_print_session_header "$display" "$profile" "$orig_model" "${orig_cwd:-$(pwd)}"
+        local effective_cwd
+        if [ -n "$orig_cwd" ] && [ -d "$orig_cwd" ]; then effective_cwd="$orig_cwd"; else effective_cwd="$(pwd)"; fi
+        (cd "$effective_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"})
+        local _exit_code=$?
+        local status_file=$(cage_get_session_file "$session" "status")
+        if cage_has_conversation "${orig_cwd:-$effective_cwd}" "$uuid"; then
+            echo "$_exit_code" > "$status_file"
+            cage_print_resume_hint "$session"
+        else
+            rm -f "$meta_file" "$status_file"
+            echo -e "${YELLOW}Session $session had no conversation and has been removed.${NC}"
+            echo -e "Start a new session: ${CYAN}cage new${NC}"
+        fi
+        return $_exit_code
     fi
 
     # Mode 2: Non-interactive with prompt

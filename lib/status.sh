@@ -31,25 +31,13 @@ _cage_status_single() {
     ' "$meta_file" 2>/dev/null)"
 
     # Determine status
-    local status="${DIM}FINISHED${NC}"
-    local running=false
-    local pid=""
-    if [ -f "$pid_file" ]; then
-        pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            status="${BOLD}${GREEN}RUNNING${NC}"
-            running=true
-        else
-            rm -f "$pid_file"
-        fi
-    fi
-    if [ "$running" = false ] && [ -f "$status_file" ]; then
-        local exit_code=$(cat "$status_file")
-        if [ "$exit_code" = "0" ]; then
-            status="${GREEN}SUCCESS${NC}"
-        elif [ -n "$exit_code" ]; then
-            status="${RED}FAILED${NC} (exit $exit_code)"
-        fi
+    cage_resolve_status "$pid_file" "$status_file" "$log_file"
+    local status="$_cage_status"
+    local running="$_cage_running"
+    local pid="$_cage_pid"
+    # Clean up stale pid files
+    if [ "$running" = false ] && [ -f "$pid_file" ]; then
+        rm -f "$pid_file"
     fi
 
     # Calculate duration
@@ -158,89 +146,47 @@ _cage_status_list() {
     local max_logs="$1"
     local today=$(date +%Y%m%d)
 
-    echo -e "${BOLD}${CYAN}=== Active Sessions ===${NC}"
-    local found=false
-
-    # Check for active sessions
-    local pid_files=("${CAGE_STORAGE}"/*/*.pid)
-    for pid_file in "${pid_files[@]}"; do
-        [ -f "$pid_file" ] || continue
-        local pid=$(cat "$pid_file")
-        local session_num=$(basename "$pid_file" .pid | sed 's/cage_//')
-        local day_dir=$(dirname "$pid_file")
-        local day_raw=$(basename "$day_dir")
-
-        # Format date for display
-        local day_display=$day_raw
-
-        # Calculate session ID
-        local session_id="S$(( ($(date -d "$today" +%s) - $(date -d "${day_raw//-/}" +%s)) / 86400 ))_${session_num}"
-        local log_file="${day_dir}/cage_${session_num}.log"
-
-        # Read metadata
-        local meta_file="${day_dir}/cage_${session_num}.meta.json"
-        local uuid="" profile=""
-        if [ -f "$meta_file" ]; then
-            eval "$(jq -r '"uuid=" + (.uuid // "" | @sh) + " profile=" + (.profile // "default" | @sh)' "$meta_file" 2>/dev/null)"
-        fi
-
-        if kill -0 "$pid" 2>/dev/null; then
-            echo -e "• ${GREEN}${session_id}${NC} (${BLUE}${day_display}${NC}) - ${BOLD}${GREEN}RUNNING${NC} (PID: ${YELLOW}$pid${NC})"
-            [ -n "$uuid" ] && echo -e "  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
-            echo -e "  ${DIM}Log:${NC} ${CYAN}$log_file${NC}"
-            echo -e "  ${DIM}Kill:${NC} cage kill $session_id"
-            found=true
-        else
-            [ -n "$uuid" ] && echo -e "• ${YELLOW}${session_id}${NC} (${BLUE}${day_display}${NC}) - ${DIM}FINISHED${NC}"
-            [ -n "$uuid" ] && echo -e "  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
-            rm -f "$pid_file"
-            found=true
-        fi
-        echo ""
-    done
-
-    if [ "$found" = false ]; then
-        echo -e "${DIM}No active sessions${NC}"
-        echo ""
-    fi
-
-    echo -e "${BOLD}${PURPLE}=== Recent Logs ===${NC}"
+    echo -e "${BOLD}${PURPLE}=== Sessions ===${NC}"
     local count=0
 
-    # Get log files sorted by modification time (newest first)
-    local log_files=()
+    # Scan meta.json files (covers both interactive and background sessions)
+    local meta_files=()
     while IFS= read -r -d '' file; do
-        log_files+=("$file")
-    done < <(find "${CAGE_STORAGE}"/* -maxdepth 1 -name "*.log" -printf '%T@\t%p\0' 2>/dev/null | sort -rzn | cut -zf2)
+        meta_files+=("$file")
+    done < <(find "${CAGE_STORAGE}"/* -maxdepth 1 -name "*.meta.json" -printf '%T@\t%p\0' 2>/dev/null | sort -rzn | cut -zf2)
 
-    for log_file in "${log_files[@]:0:$max_logs}"; do
-        [ -f "$log_file" ] || continue
-        local session_num=$(basename "$log_file" .log | sed 's/cage_//')
-        local day_dir=$(dirname "$log_file")
+    for meta_file in "${meta_files[@]:0:$max_logs}"; do
+        [ -f "$meta_file" ] || continue
+        local session_num=$(basename "$meta_file" .meta.json | sed 's/cage_//')
+        local day_dir=$(dirname "$meta_file")
         local day_raw=$(basename "$day_dir")
-
-        local day_display=$day_raw
         local session_id="S$(( ($(date -d "$today" +%s) - $(date -d "${day_raw//-/}" +%s)) / 86400 ))_${session_num}"
-        local size=$(du -h "$log_file" 2>/dev/null | cut -f1)
-        local time=$(stat -c '%y' "$log_file" 2>/dev/null | cut -d' ' -f2 | cut -d'.' -f1)
 
-        # Read metadata
-        local meta_file="${day_dir}/cage_${session_num}.meta.json"
-        local uuid="" profile="" resumable=""
-        if [ -f "$meta_file" ]; then
-            eval "$(jq -r '"uuid=" + (.uuid // "" | @sh) + " profile=" + (.profile // "default" | @sh)' "$meta_file" 2>/dev/null)"
-            [ -n "$uuid" ] && resumable=" ${GREEN}[R]${NC}"
-        fi
+        local uuid="" profile="" start_time=""
+        eval "$(jq -r '
+            "uuid=" + (.uuid // "" | @sh) + " " +
+            "profile=" + (.profile // "default" | @sh) + " " +
+            "start_time=" + (.start_time // "" | @sh)
+        ' "$meta_file" 2>/dev/null)"
 
-        echo -e "• ${GREEN}${session_id}${NC} (${BLUE}${day_display} ${time}${NC}) - ${YELLOW}${size}${NC}${resumable}"
-        if [ -n "$uuid" ]; then
-            echo -e "  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
-            echo -e "  ${DIM}Resume:${NC} cage resume ${session_id}"
-        fi
+        local time="${start_time:0:19}"; time="${time/T/ }"
+        [ -z "$time" ] && time=$(stat -c '%y' "$meta_file" 2>/dev/null | cut -d'.' -f1)
+
+        local log_file="${day_dir}/cage_${session_num}.log"
+        local status_file="${day_dir}/cage_${session_num}.status"
+        local pid_file="${day_dir}/cage_${session_num}.pid"
+
+        # Determine status label
+        cage_resolve_status "$pid_file" "$status_file" "$log_file"
+        local status_label="$_cage_status"
+
+        echo -e "• ${GREEN}${session_id}${NC} (${BLUE}${time}${NC}) - ${status_label}"
+        echo -e "  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
+        echo -e "  ${DIM}Resume:${NC} cage resume ${session_id}"
         ((count++))
     done
 
     if [ $count -eq 0 ]; then
-        echo -e "${DIM}No log files found${NC}"
+        echo -e "${DIM}No sessions found${NC}"
     fi
 }

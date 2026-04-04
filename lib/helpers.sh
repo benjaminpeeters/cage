@@ -115,6 +115,69 @@ cage_next_session_num() {
     echo "$session_num"
 }
 
+# Print session info header before launching claude
+# Usage: cage_print_session_header "cage_2026-04-04_2 (S0_2)" profile model cwd
+cage_print_session_header() {
+    local session_display="$1"
+    local profile="$2"
+    local model="$3"
+    local cwd="$4"
+    echo -e "${GREEN}✓${NC} Session: ${BOLD}${session_display}${NC}"
+    echo -e "${GREEN}✓${NC} Profile: ${PURPLE}${profile}${NC}  Model: ${CYAN}${model}${NC}  CWD: ${CYAN}${cwd}${NC}"
+    echo ""
+}
+
+# Print resume hint after claude exits
+# Usage: cage_print_resume_hint session_id
+cage_print_resume_hint() {
+    local session_id="$1"
+    echo -e "${CYAN}Resume with:${NC} cage resume ${session_id}"
+}
+
+# Check if Claude stored a conversation for a session
+# Returns 0 if conversation file exists, 1 otherwise
+# Usage: cage_has_conversation cwd uuid
+cage_has_conversation() {
+    local cwd="$1" uuid="$2"
+    [ -n "$cwd" ] && [ -n "$uuid" ] || return 1
+    local slug="${cwd//\//-}"
+    [ -f "${HOME}/.claude/projects/${slug}/${uuid}.jsonl" ]
+}
+
+# Resolve session status label from pid/status/log files
+# Sets globals: _cage_status (colored label), _cage_running (true/false), _cage_pid (PID if running)
+# Usage: cage_resolve_status pid_file status_file log_file
+cage_resolve_status() {
+    local pid_file="$1" status_file="$2" log_file="$3"
+    _cage_running=false
+    _cage_status="${DIM}FINISHED${NC}"
+    _cage_pid=""
+
+    local pid=""
+    [ -f "$pid_file" ] && read -r pid < "$pid_file"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        _cage_status="${BOLD}${GREEN}RUNNING${NC}"
+        _cage_running=true
+        _cage_pid="$pid"
+    elif [ -f "$status_file" ]; then
+        local exit_code=""
+        read -r exit_code < "$status_file"
+        if [ "$exit_code" = "0" ]; then
+            if [ -f "$log_file" ]; then
+                local size; size=$(du -h "$log_file" 2>/dev/null | cut -f1)
+                _cage_status="${GREEN}SUCCESS${NC} (${size})"
+            else
+                _cage_status="${GREEN}FINISHED${NC}"
+            fi
+        elif [ -n "$exit_code" ]; then
+            _cage_status="${RED}FAILED${NC} (exit $exit_code)"
+        fi
+    elif [ -f "$log_file" ]; then
+        local size; size=$(du -h "$log_file" 2>/dev/null | cut -f1)
+        _cage_status="${DIM}UNKNOWN${NC} (${size})"
+    fi
+}
+
 # Check if a session is currently running
 # Usage: cage_is_running "S0_1" -> 0 (running) or 1 (not running)
 cage_is_running() {
