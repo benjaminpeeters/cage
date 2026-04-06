@@ -5,8 +5,168 @@
 
 CAGE_PROFILES_DIR="$CAGE_ROOT/profiles"
 
-# All known Claude tools for the tool selector
-_CAGE_ALL_TOOLS="Bash Read Write Edit Glob Grep WebSearch WebFetch TodoWrite"
+# Tool bundle definitions: display key → comma-separated expanded tools
+# Bash (unrestricted) is intentionally excluded — edit profile JSON directly if needed
+declare -A _CAGE_TOOL_BUNDLES=(
+    ["Glob+Grep"]="Glob,Grep"
+    ["Write+Edit"]="Write,Edit"
+    ["Web(Search+Fetch)"]="WebSearch,WebFetch"
+    ["Bash(ls+find+tree+du+df)"]="Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*)"
+    ["Bash(cat+head+tail+file)"]="Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*)"
+    ["Bash(git: status+log+diff+show)"]="Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+    ["Bash(grep+diff+stat+wc)"]="Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*)"
+    ["Bash(sort+uniq+cut+tr+echo)"]="Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*)"
+    ["Bash(which+type)"]="Bash(which:*),Bash(type:*)"
+)
+
+# Ordered display list for the tool selector (bundles + standalones)
+_CAGE_TOOL_DISPLAY=(
+    "Read"
+    "Glob+Grep"
+    "Write+Edit"
+    "Web(Search+Fetch)"
+    "TodoWrite"
+    "Bash(ls+find+tree+du+df)"
+    "Bash(cat+head+tail+file)"
+    "Bash(git: status+log+diff+show)"
+    "Bash(git add:*)"
+    "Bash(git branch:*)"
+    "Bash(grep+diff+stat+wc)"
+    "Bash(sort+uniq+cut+tr+echo)"
+    "Bash(curl:*)"
+    "Bash(which+type)"
+)
+
+# Interactive tool selector using gum choose with bundles
+# Reads PROF_TOOLS, writes updated PROF_TOOLS
+_cage_tool_selector() {
+    # Build lookup set of current profile tools
+    declare -A profile_tools_set
+    local parts=()
+    IFS=',' read -ra parts <<< "$PROF_TOOLS"
+    for t in "${parts[@]}"; do profile_tools_set["$t"]=1; done
+
+    # Determine pre-selected display items
+    local selected=()
+
+    for item in "${_CAGE_TOOL_DISPLAY[@]}"; do
+        if [[ -n "${_CAGE_TOOL_BUNDLES[$item]}" ]]; then
+            # Bundle: select if all component tools are present
+            local all_present=true
+            local bundle_parts=()
+            IFS=',' read -ra bundle_parts <<< "${_CAGE_TOOL_BUNDLES[$item]}"
+            for bt in "${bundle_parts[@]}"; do
+                [[ -z "${profile_tools_set[$bt]}" ]] && { all_present=false; break; }
+            done
+            $all_present && selected+=("$item")
+        else
+            # Standalone: select if present in profile
+            [[ -n "${profile_tools_set[$item]}" ]] && selected+=("$item")
+        fi
+    done
+
+    # Warn on partial bundles
+    local header="Select tools  (space=toggle, enter=confirm)"
+    for bk in "${!_CAGE_TOOL_BUNDLES[@]}"; do
+        local any=false all=true
+        local bparts=()
+        IFS=',' read -ra bparts <<< "${_CAGE_TOOL_BUNDLES[$bk]}"
+        for bt in "${bparts[@]}"; do
+            [[ -n "${profile_tools_set[$bt]}" ]] && any=true || all=false
+        done
+        if $any && ! $all; then
+            header="Select tools  [partial bundle: select '${bk}' to keep all]"
+            break
+        fi
+    done
+
+    # ANSI color codes
+    local GRY=$'\e[90m' BLU=$'\e[94m' RST=$'\e[0m'
+
+    # Decorated labels — sync with _CAGE_TOOL_DISPLAY, _CAGE_TOOL_BUNDLES, and dmap when adding tools
+    declare -A lmap
+    lmap["Read"]="${RST}Read"
+    lmap["Glob+Grep"]="${BLU}Glob${RST}+${BLU}Grep${RST}"
+    lmap["Write+Edit"]="${BLU}Write${RST}+${BLU}Edit${RST}"
+    lmap["Web(Search+Fetch)"]="${RST}Web(${BLU}Search${RST}+${BLU}Fetch${RST})"
+    lmap["TodoWrite"]="${RST}TodoWrite"
+    lmap["Bash(ls+find+tree+du+df)"]="${RST}Bash(${BLU}ls${RST}+${BLU}find${RST}+${BLU}tree${RST}+${BLU}du${RST}+${BLU}df${RST})"
+    lmap["Bash(cat+head+tail+file)"]="${RST}Bash(${BLU}cat${RST}+${BLU}head${RST}+${BLU}tail${RST}+${BLU}file${RST})"
+    lmap["Bash(git: status+log+diff+show)"]="${RST}Bash(git: ${BLU}status${RST}+${BLU}log${RST}+${BLU}diff${RST}+${BLU}show${RST})"
+    lmap["Bash(git add:*)"]="${RST}Bash(${BLU}git add${RST}:*)"
+    lmap["Bash(git branch:*)"]="${RST}Bash(${BLU}git branch${RST}:*)"
+    lmap["Bash(grep+diff+stat+wc)"]="${RST}Bash(${BLU}grep${RST}+${BLU}diff${RST}+${BLU}stat${RST}+${BLU}wc${RST})"
+    lmap["Bash(sort+uniq+cut+tr+echo)"]="${RST}Bash(${BLU}sort${RST}+${BLU}uniq${RST}+${BLU}cut${RST}+${BLU}tr${RST}+${BLU}echo${RST})"
+    lmap["Bash(curl:*)"]="${RST}Bash(${BLU}curl${RST}:*)"
+    lmap["Bash(which+type)"]="${RST}Bash(${BLU}which${RST}+${BLU}type${RST})"
+
+    # Descriptions
+    declare -A dmap
+    dmap["Read"]="read files"
+    dmap["Glob+Grep"]="find files · search content"
+    dmap["Write+Edit"]="create & modify files"
+    dmap["Web(Search+Fetch)"]="web search · fetch URLs"
+    dmap["TodoWrite"]="manage task list"
+    dmap["Bash(ls+find+tree+du+df)"]="browse dirs & disk usage"
+    dmap["Bash(cat+head+tail+file)"]="file content & type detection"
+    dmap["Bash(git: status+log+diff+show)"]="inspect git history, read-only"
+    dmap["Bash(git add:*)"]="stage files for commit"
+    dmap["Bash(git branch:*)"]="list & create branches"
+    dmap["Bash(grep+diff+stat+wc)"]="search · compare · count"
+    dmap["Bash(sort+uniq+cut+tr+echo)"]="sort · dedupe · transform text"
+    dmap["Bash(curl:*)"]="HTTP requests"
+    dmap["Bash(which+type)"]="locate commands"
+
+    # Build gum items and selected-labels in a single pass
+    local gum_items=() sel_labels=()
+    declare -A is_selected
+    for s in "${selected[@]}"; do is_selected["$s"]=1; done
+
+    for item in "${_CAGE_TOOL_DISPLAY[@]}"; do
+        local lbl="${lmap[$item]:-$item}"
+        local desc="${dmap[$item]:-}"
+        local display_str
+        if [[ -n "$desc" ]]; then
+            display_str="${lbl}  ${GRY}${desc}${RST}"
+        else
+            display_str="${lbl}"
+        fi
+        gum_items+=("${display_str}|${item}")
+        [[ -n "${is_selected[$item]}" ]] && sel_labels+=("$display_str")
+    done
+
+    local sel_str
+    sel_str=$(IFS=,; echo "${sel_labels[*]}")
+
+    local sel_pfx=$'\e[32m✓\e[0m '
+    local raw_sel
+    raw_sel=$(gum choose --no-limit --no-strip-ansi \
+        --label-delimiter="|" \
+        --header "$header" \
+        --selected "$sel_str" \
+        --selected-prefix "$sel_pfx" \
+        --unselected-prefix "  " \
+        --cursor-prefix "  " \
+        "${gum_items[@]}")
+    local gum_rc=$?
+
+    if [ $gum_rc -eq 0 ]; then
+        # Expand bundles to flat tool list
+        local flat=()
+        if [ -n "$raw_sel" ]; then
+            while IFS= read -r item; do
+                if [[ -n "${_CAGE_TOOL_BUNDLES[$item]}" ]]; then
+                    local exp=()
+                    IFS=',' read -ra exp <<< "${_CAGE_TOOL_BUNDLES[$item]}"
+                    flat+=("${exp[@]}")
+                else
+                    flat+=("$item")
+                fi
+            done <<< "$raw_sel"
+        fi
+        PROF_TOOLS=$(IFS=,; echo "${flat[*]}")
+    fi
+}
 
 _cage_profile_help() {
     cat <<'EOF'
@@ -107,25 +267,7 @@ _cage_profile_edit_interactive() {
                 [ $? -eq 0 ] && PROF_OUTPUT="$new_output"
                 ;;
             Tools:*)
-                # Build selected list from current tools
-                local current_tools=",$PROF_TOOLS,"
-                local selected_args=()
-                for tool in $_CAGE_ALL_TOOLS; do
-                    if [[ "$current_tools" == *",$tool,"* ]] || [[ "$current_tools" == *",$tool("* ]]; then
-                        selected_args+=("$tool")
-                    fi
-                done
-
-                # Multi-select with current tools pre-selected
-                local new_tools
-                new_tools=$(gum choose --no-limit \
-                    --header "Select tools (space to toggle)" \
-                    --selected "$(IFS=,; echo "${selected_args[*]}")" \
-                    $_CAGE_ALL_TOOLS)
-                if [ $? -eq 0 ] && [ -n "$new_tools" ]; then
-                    # Convert newline-separated to comma-separated
-                    PROF_TOOLS=$(echo "$new_tools" | tr '\n' ',' | sed 's/,$//')
-                fi
+                _cage_tool_selector
                 ;;
             CWD:*)
                 local new_cwd
@@ -212,12 +354,9 @@ cage_profile() {
                 echo "Use 'cage profile edit $name' to modify it."
                 return 1
             fi
-            # Initialize with defaults
+            # Initialize from default profile
+            cage_load_profile "default" || return 1
             PROF_DESCRIPTION=""
-            PROF_MODEL="sonnet"
-            PROF_TOOLS="Bash,Write,Read,Edit,Glob,Grep"
-            PROF_OUTPUT="json"
-            PROF_CWD="."
             PROF_SYSTEM_PROMPT=""
             _cage_profile_save "$profile_file"
             _cage_profile_edit_interactive "$name"

@@ -1,7 +1,7 @@
 {
   "description": "Online research",
   "model": "opus",
-  "tools": "Read,Glob,Grep,WebSearch,WebFetch",
+  "tools": "Read,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(curl:*),Bash(which:*),Bash(type:*)",
   "output": "markdown",
   "cwd": "/tmp/cage",
   "system_prompt": "Search online for current information. Cite sources."

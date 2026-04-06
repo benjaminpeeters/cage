@@ -178,6 +178,20 @@ cage_resolve_status() {
     fi
 }
 
+# Wrap interactive claude session with PID tracking and terminal background color
+# Usage: cage_interactive_start "$pid_file"; ...; cage_interactive_end "$pid_file"
+cage_interactive_start() {
+    local pid_file="$1"
+    echo $$ > "$pid_file"
+    [ -t 1 ] && printf '\e]11;%s\a' "${COLOR_bg_claude:-#301000}"
+}
+
+cage_interactive_end() {
+    local pid_file="$1"
+    [ -t 1 ] && printf '\e]11;%s\a' "${COLOR_bg_shell:-#300020}"
+    rm -f "$pid_file"
+}
+
 # Check if a session is currently running
 # Usage: cage_is_running "S0_1" -> 0 (running) or 1 (not running)
 cage_is_running() {

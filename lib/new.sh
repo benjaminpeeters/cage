@@ -145,8 +145,13 @@ cage_new() {
     # Mode 1: Interactive (default)
     if [ "$print_mode" = false ]; then
         cage_print_session_header "$session_name ($session_id)" "$profile" "$model" "$work_dir"
+        cage_interactive_start "$pid_file"
+        trap 'cage_interactive_end "$pid_file"' EXIT
+        trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
         (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --allowedTools "$tools" ${task:+"$task"})
         local _exit_code=$?
+        trap - EXIT INT TERM
+        cage_interactive_end "$pid_file"
         if cage_has_conversation "$work_dir" "$uuid"; then
             echo "$_exit_code" > "$status_file"
             cage_print_resume_hint "$session_id"

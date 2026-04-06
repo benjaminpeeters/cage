@@ -69,7 +69,8 @@ _cage_status_single() {
     local day_dir=$(dirname "$log_file")
     local day_raw=$(basename "$day_dir")
     local session_num=$(basename "$log_file" .log | sed 's/cage_//')
-    local session_id="S$(( ($(date -d "$today" +%s) - $(date -d "${day_raw//-/}" +%s)) / 86400 ))_${session_num}"
+    local today_ts=$(date -d "$today" +%s)
+    local session_id="S$(( (today_ts - $(date -d "${day_raw//-/}" +%s)) / 86400 ))_${session_num}"
 
     echo -e "${BOLD}Session: ${GREEN}${session_id}${NC} ${DIM}(${name})${NC}"
     echo -e "  ${DIM}Status:${NC}   $status"
@@ -146,21 +147,30 @@ _cage_status_list() {
     local max_logs="$1"
     local today=$(date +%Y%m%d)
 
-    echo -e "${BOLD}${PURPLE}=== Sessions ===${NC}"
-    local count=0
-
-    # Scan meta.json files (covers both interactive and background sessions)
+    # Scan all meta.json files sorted by modification time (newest first)
     local meta_files=()
     while IFS= read -r -d '' file; do
         meta_files+=("$file")
     done < <(find "${CAGE_STORAGE}"/* -maxdepth 1 -name "*.meta.json" -printf '%T@\t%p\0' 2>/dev/null | sort -rzn | cut -zf2)
 
-    for meta_file in "${meta_files[@]:0:$max_logs}"; do
+    # Split into running and finished
+    local running_entries=() finished_entries=()
+    local count=0
+    local today_ts=$(date -d "$today" +%s)
+
+    for meta_file in "${meta_files[@]}"; do
         [ -f "$meta_file" ] || continue
         local session_num=$(basename "$meta_file" .meta.json | sed 's/cage_//')
         local day_dir=$(dirname "$meta_file")
         local day_raw=$(basename "$day_dir")
-        local session_id="S$(( ($(date -d "$today" +%s) - $(date -d "${day_raw//-/}" +%s)) / 86400 ))_${session_num}"
+        local pid_file="${day_dir}/cage_${session_num}.pid"
+
+        # Quick check: if no pid file and we already have enough finished, skip
+        if [ ! -f "$pid_file" ] && [ $count -ge $max_logs ]; then
+            continue
+        fi
+
+        local session_id="S$(( (today_ts - $(date -d "${day_raw//-/}" +%s)) / 86400 ))_${session_num}"
 
         local uuid="" profile="" start_time=""
         eval "$(jq -r '
@@ -174,19 +184,36 @@ _cage_status_list() {
 
         local log_file="${day_dir}/cage_${session_num}.log"
         local status_file="${day_dir}/cage_${session_num}.status"
-        local pid_file="${day_dir}/cage_${session_num}.pid"
 
-        # Determine status label
         cage_resolve_status "$pid_file" "$status_file" "$log_file"
         local status_label="$_cage_status"
+        local line1="• ${GREEN}${session_id}${NC} (${BLUE}${time}${NC}) - ${status_label}"
+        local line2="  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
 
-        echo -e "• ${GREEN}${session_id}${NC} (${BLUE}${time}${NC}) - ${status_label}"
-        echo -e "  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
-        echo -e "  ${DIM}Resume:${NC} cage resume ${session_id}"
-        ((count++))
+        if [ "$_cage_running" = true ]; then
+            running_entries+=("$line1"$'\n'"$line2")
+        elif [ $count -lt $max_logs ]; then
+            finished_entries+=("$line1"$'\n'"$line2")
+            ((count++))
+        fi
     done
 
-    if [ $count -eq 0 ]; then
-        echo -e "${DIM}No sessions found${NC}"
+    echo -e "${BOLD}${CYAN}=== Active Sessions ===${NC}"
+    if [ ${#running_entries[@]} -eq 0 ]; then
+        echo -e "${DIM}No active sessions${NC}"
+    else
+        for entry in "${running_entries[@]}"; do
+            echo -e "$entry"
+        done
+    fi
+
+    echo ""
+    echo -e "${BOLD}${PURPLE}=== Recent Sessions ===${NC}"
+    if [ ${#finished_entries[@]} -eq 0 ]; then
+        echo -e "${DIM}No recent sessions${NC}"
+    else
+        for entry in "${finished_entries[@]}"; do
+            echo -e "$entry"
+        done
     fi
 }

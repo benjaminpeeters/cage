@@ -89,8 +89,14 @@ cage_resume() {
         cage_print_session_header "$display" "$profile" "$orig_model" "${orig_cwd:-$(pwd)}"
         local effective_cwd
         if [ -n "$orig_cwd" ] && [ -d "$orig_cwd" ]; then effective_cwd="$orig_cwd"; else effective_cwd="$(pwd)"; fi
+        local resume_pid_file=$(cage_get_session_file "$session" "pid")
+        cage_interactive_start "$resume_pid_file"
+        trap 'cage_interactive_end "$resume_pid_file"' EXIT
+        trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
         (cd "$effective_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"})
         local _exit_code=$?
+        trap - EXIT INT TERM
+        cage_interactive_end "$resume_pid_file"
         local status_file=$(cage_get_session_file "$session" "status")
         if cage_has_conversation "${orig_cwd:-$effective_cwd}" "$uuid"; then
             echo "$_exit_code" > "$status_file"
