@@ -55,18 +55,33 @@ cage profile delete custom                    # Delete profile
 
 ## Profiles
 
-Profiles are JSON files in `profiles/` defining model, tools, output format, working directory, and system prompt.
+Profiles are JSON files in `profiles/` defining model, effort, tools, output format, working directory, system prompt, and an optional `sandbox` block.
 
 | Profile | Model | Tools | Output | CWD | Purpose |
 |---------|-------|-------|--------|-----|---------|
-| default | sonnet | All standard tools | markdown | /tmp/cage | General purpose |
-| fast | haiku | Basic tools | json | /tmp/cage | Lightweight, speed-optimized |
+| default | opus | All standard tools | markdown | /tmp/cage | General purpose |
+| fast | sonnet | Basic tools | json | /tmp/cage | Lightweight, speed-optimized |
 | explore | opus | Glob, Grep, Read, limited Bash | markdown | . | Read-only codebase exploration |
 | write | opus | Read, Write, Edit, Glob, Grep, Bash | json | . | Code modification |
 | web | opus | Read, Glob, Grep, WebSearch, WebFetch | markdown | /tmp/cage | Online research |
-| full | opus | All tools + TodoWrite | json | . | All tools with project context |
+| full | opus | All tools + TodoWrite | json | /tmp | All tools, complex multi-step tasks |
+| self | opus | Standard tools + git branch | markdown | cage repo | Modify cage itself |
+| settings | opus | Standard tools + Write, Edit, nvim, lua | markdown | ~/MEGA/config | Update host configs (Claude Code, WezTerm, Neovim, dotfiles) |
 
 CWD `.` means the caller's working directory. `/tmp/cage` is an isolated directory.
+
+### Per-profile sandbox
+
+A profile may declare an optional `sandbox` block to widen its own bubblewrap sandbox, scoped to that profile's sessions only (it never edits global settings or affects other profiles):
+
+```json
+"sandbox": {
+  "filesystem": { "allowWrite": [...], "denyWrite": [...], "allowRead": [...] },
+  "network":    { "allowedDomains": [...] }
+}
+```
+
+Filesystem entries must be absolute paths; domains must be non-empty. When present, cage writes a per-session `cage_N.settings.json` containing exactly that block and launches with `claude --settings <file>` (sandbox arrays merge across scopes). Profiles without a `sandbox` block launch unchanged. The `settings` profile uses this to grant nvim its write paths so it can run `nvim --headless` config validation.
 
 ## Session IDs
 

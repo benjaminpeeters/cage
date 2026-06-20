@@ -1,7 +1,8 @@
 {
   "description": "General purpose tools",
-  "model": "sonnet",
-  "tools": "Read,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(curl:*),Bash(which:*),Bash(type:*)",
+  "model": "opus[1m]",
+  "effort": "xhigh",
+  "tools": "Read,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(curl:*),Bash(which:*),Bash(type:*),Bash(awk:*),Bash(pdftotext:*),Bash(pdfinfo:*),Bash(gdxdump:*),Bash(pdflatex:*),Bash(latexmk:*),Bash(bibtex:*),Bash(makeindex:*),Bash(jq:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(tac:*),Bash(nl:*),Bash(rev:*),Bash(paste:*),Bash(join:*),Bash(comm:*),Bash(column:*),Bash(md5sum:*),Bash(sha256sum:*),Bash(sha1sum:*),Bash(ps:*),Bash(lsof:*),Bash(ss:*),Bash(free:*),Bash(uptime:*),Bash(lscpu:*),Bash(lsblk:*),mcp__google-docs-mcp__readSpreadsheet,mcp__google-docs-mcp__getPresentation,mcp__google-docs-mcp__readGoogleDoc",
   "output": "markdown",
   "cwd": "/tmp/cage",
   "system_prompt": ""

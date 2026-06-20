@@ -1,0 +1,23 @@
+{
+  "description": "Update host configs (Claude Code, WezTerm, Neovim, dotfiles)",
+  "model": "opus[1m]",
+  "effort": "max",
+  "tools": "Read,Write,Edit,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(which:*),Bash(type:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(jq:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(awk:*),Bash(tac:*),Bash(nl:*),Bash(rev:*),Bash(curl:*),Bash(paste:*),Bash(join:*),Bash(comm:*),Bash(column:*),Bash(ps:*),Bash(lsof:*),Bash(ss:*),Bash(free:*),Bash(uptime:*),Bash(lscpu:*),Bash(lsblk:*),Bash(nvim:*),Bash(luac:*),Bash(lua:*)",
+  "output": "markdown",
+  "cwd": "/home/bpeeters/MEGA/config",
+  "system_prompt": "File layout:\n- Claude Code: ~/.claude/settings.json is a symlink to ~/MEGA/config/dotfiles/ai/settings.json (always edit the symlink target, not the symlink). Hooks at ~/MEGA/config/dotfiles/ai/hooks/. Commands at ~/MEGA/config/dotfiles/ai/commands/. Rules at ~/MEGA/config/dotfiles/ai/rules/. Global CLAUDE.md at ~/MEGA/config/dotfiles/ai/CLAUDE.md. Many project-local overrides live at ~/MEGA/repo/**/.claude/settings.json and settings.local.json\n- WezTerm: ~/MEGA/config/dotfiles/wezterm.lua.\n- Neovim: ~/MEGA/repo/nvim-config/ (separate git repo). Docs via `:help` and https://neovim.io/doc/.\n- Other dotfiles: ~/MEGA/config/dotfiles/.\n\nWorking principles:\n1. Read before write. Inspect current values and surrounding context before changing anything.\n2. Validate after every edit. JSON: `jq . <file>`. Lua: `luac -p <file>` (or `lua -e \"loadfile('<file>')\"`). Neovim Lua module: `nvim --headless -c 'lua require(\"<module>\")' -c qa`.\n3. Verify keys against official docs before introducing them. Never invent setting names — for Claude Code, every key must be present in the schema URL above.\n4. Symlink awareness: ~/.claude/ contains symlinks into dotfiles. Always edit the dotfile source of truth so the change persists in version control.\n5. Git-tracked: most targets are tracked. Run `git status` and `git diff` after edits and summarize the diff. Do not commit or push unless the user explicitly asks.\n6. Restart awareness: Claude Code, WezTerm, and Neovim all read their configs at startup. State explicitly that a restart is required after changes; do not promise live reload unless verified.\n7. Stay scoped: focus and modify files within ~/.claude/, ~/MEGA/config/dotfiles/, and ~/MEGA/repo/nvim-config/.",
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "/home/bpeeters/MEGA/repo/nvim-config",
+        "/home/bpeeters/MEGA/repo/nvim-config/**",
+        "/home/bpeeters/.cache/nvim",
+        "/home/bpeeters/.cache/nvim/**",
+        "/home/bpeeters/.local/state/nvim",
+        "/home/bpeeters/.local/state/nvim/**",
+        "/home/bpeeters/.local/share/nvim",
+        "/home/bpeeters/.local/share/nvim/**"
+      ]
+    }
+  }
+}

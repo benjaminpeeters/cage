@@ -15,7 +15,7 @@ With -p, runs non-interactively in the background.
 
 Options:
   -p, --print          Non-interactive background mode (like claude -p)
-  -m, --model MODEL    Model override (opus, sonnet, haiku)
+  -m, --model MODEL    Model override (opus[1m], sonnet, haiku)
   -t, --tail           Tail the log after starting (only with -p)
   --md                 Force markdown output (only with -p)
   --json               Force JSON output (only with -p)
@@ -28,14 +28,13 @@ EOF
     for f in "$CAGE_PROFILES_DIR"/*.json; do
         [ -f "$f" ] || continue
         local name=$(basename "$f" .json)
-        local desc="" model="" output="" tools=""
-        eval "$(jq -r '"desc=" + (.description // "" | @sh) + " model=" + (.model // "" | @sh) + " output=" + (.output // "" | @sh) + " tools=" + (.tools // "" | @sh)' "$f")"
-        printf "  %-10s %s [%s, %s]\n" "$name" "$desc" "$model" "$output"
-        printf "             %s\n" "$tools"
+        _cage_profile_summary_fields "$f"
+        printf "  %-10s %s [%s, %s, %s]\n" "$name" "$PSUM_DESC" "$PSUM_MODEL" "$PSUM_EFFORT" "$PSUM_OUTPUT"
+        printf "             %s\n" "$PSUM_TOOLS"
     done
     cat <<'EOF'
 
-Model can be overridden with -m: cage new -m opus fast "task"
+Model can be overridden with -m: cage new -m 'opus[1m]' fast "task"
 See 'cage profile' for full profile management.
 
 Examples:
@@ -43,7 +42,7 @@ Examples:
   cage new fast "Quick question about this code"
   cage new explore "Map out the auth module"
   cage new -p web "What are best practices for X?"
-  cage new -m opus "Complex refactoring task"
+  cage new -m 'opus[1m]' "Complex refactoring task"
   cage new -pt "Explain this codebase"
 EOF
 }
@@ -93,6 +92,7 @@ cage_new() {
 
     local tools="$PROF_TOOLS"
     local model="$PROF_MODEL"
+    local effort="$PROF_EFFORT"
     local sys_prompt="$PROF_SYSTEM_PROMPT"
     local output_format="$PROF_OUTPUT"
     local work_dir="$PROF_CWD"
@@ -124,11 +124,19 @@ cage_new() {
     local pid_file="${log_dir}/cage_${session_num}.pid"
     local meta_file="${log_dir}/cage_${session_num}.meta.json"
     local status_file="${log_dir}/cage_${session_num}.status"
+    local settings_file=""
 
     # Set default result file if not specified
     [ -z "$result_file" ] && result_file="${log_dir}/cage_${session_num}.result.json"
 
-    # Store metadata as JSON before running
+    # Generate a per-session sandbox settings file when the profile declares one.
+    # Only this session sees it (passed via --settings); global settings stay untouched.
+    if [ "$PROF_HAS_SANDBOX" = true ]; then
+        settings_file="${log_dir}/cage_${session_num}.settings.json"
+        cage_write_sandbox_settings "$settings_file" "$PROF_SANDBOX"
+    fi
+
+    # Store metadata as JSON before running (sandbox key omitted when absent)
     jq -n \
         --arg uuid "$uuid" \
         --arg name "$session_name" \
@@ -136,19 +144,25 @@ cage_new() {
         --arg task "$task" \
         --arg start_time "$(date -Iseconds)" \
         --arg model "$model" \
+        --arg effort "$effort" \
         --arg tools "$tools" \
         --arg output "$output_format" \
         --arg cwd "$work_dir" \
-        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, tools: $tools, output: $output, cwd: $cwd}' \
+        --argjson sandbox "${PROF_SANDBOX:-null}" \
+        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, output: $output, cwd: $cwd}
+         + (if $sandbox != null then {sandbox: $sandbox} else {} end)' \
         > "$meta_file"
 
     # Mode 1: Interactive (default)
     if [ "$print_mode" = false ]; then
         cage_print_session_header "$session_name ($session_id)" "$profile" "$model" "$work_dir"
+        # Empty array → zero args, so a sandbox-less profile launches byte-identically.
+        local settings_args=()
+        [ "$PROF_HAS_SANDBOX" = true ] && settings_args=(--settings "$settings_file")
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --allowedTools "$tools" ${task:+"$task"})
+        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" ${task:+"$task"})
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$pid_file"
@@ -157,6 +171,7 @@ cage_new() {
             cage_print_resume_hint "$session_id"
         else
             rm -f "$meta_file" "$status_file"
+            [ -n "$settings_file" ] && rm -f "$settings_file"
             echo -e "${DIM}Empty session removed.${NC}"
         fi
         return $_exit_code
@@ -201,6 +216,13 @@ STATUS_FILE="$9"
 MD_MODE="${10}"
 SESSION_NAME="${11}"
 WORK_DIR="${12}"
+EFFORT="${13}"
+SETTINGS_FILE="${14}"
+
+# Per-session sandbox settings. Empty when the profile declares no sandbox block,
+# so the claude command below is byte-identical to a non-sandbox launch.
+SETTINGS_ARGS=()
+[ -n "$SETTINGS_FILE" ] && SETTINGS_ARGS=(--settings "$SETTINGS_FILE")
 
 cd "$WORK_DIR" || exit 1
 
@@ -215,13 +237,20 @@ cd "$WORK_DIR" || exit 1
     echo "---"
 } > "$LOG_FILE"
 
+# Headless: no one can answer a permission prompt, and an unanswerable ask aborts
+# the run. The mode-policy.sh hook reads CAGE_HEADLESS and converts every would-be
+# ask into a deny-with-reason (recoverable by the model) instead of a hang.
+export CAGE_HEADLESS=1
+
 # Run Claude and capture output
 if [ "$MD_MODE" = "true" ]; then
     claude -p "$TASK" \
         --session-id "$UUID" \
         --name "$SESSION_NAME" \
         --model "$MODEL" \
+        --effort "$EFFORT" \
         --allowedTools "$TOOLS" \
+        "${SETTINGS_ARGS[@]}" \
         --output-format text >> "$LOG_FILE" 2>&1
     EXIT_CODE=$?
     # For markdown mode, copy log content to result (minus header)
@@ -231,7 +260,9 @@ else
         --session-id "$UUID" \
         --name "$SESSION_NAME" \
         --model "$MODEL" \
+        --effort "$EFFORT" \
         --allowedTools "$TOOLS" \
+        "${SETTINGS_ARGS[@]}" \
         $OUTPUT_FLAGS 2>&1)
     EXIT_CODE=$?
     echo "$OUTPUT" >> "$LOG_FILE"
@@ -266,6 +297,8 @@ WRAPPER_EOF
         "$md_mode" \
         "$session_name" \
         "$work_dir" \
+        "$effort" \
+        "$settings_file" \
         < /dev/null > /dev/null 2>&1 &
 
     local pid=$!
@@ -276,7 +309,7 @@ WRAPPER_EOF
     echo -e "${GREEN}✓${NC} Started session: ${BOLD}$session_name${NC}"
     echo -e "${GREEN}✓${NC} PID: ${YELLOW}$pid${NC}"
     echo -e "${GREEN}✓${NC} UUID: ${CYAN}${uuid}${NC}"
-    echo -e "${GREEN}✓${NC} Profile: ${PURPLE}$profile${NC}  Model: ${CYAN}$model${NC}  Output: ${CYAN}$output_format${NC}"
+    echo -e "${GREEN}✓${NC} Profile: ${PURPLE}$profile${NC}  Model: ${CYAN}$model${NC}  Effort: ${CYAN}$effort${NC}  Output: ${CYAN}$output_format${NC}"
     echo -e "${GREEN}✓${NC} Log: ${CYAN}$log_file${NC}"
     echo ""
     echo -e "${BOLD}Commands:${NC}"

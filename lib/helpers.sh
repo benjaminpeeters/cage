@@ -217,3 +217,62 @@ cage_get_pid() {
         cat "$pid_file"
     fi
 }
+
+# Validate a profile's sandbox block (compact JSON string).
+# Allowed shape: {"filesystem":{"allowWrite":[],"denyWrite":[],"allowRead":[]},
+#                 "network":{"allowedDomains":[]}}
+# Filesystem entries must be absolute paths; domains must be non-empty/whitespace-free.
+# Prints one clear error per problem to stderr; returns 1 on any problem, 0 if valid.
+# Usage: cage_validate_sandbox "$compact_json" "$profile_name"
+cage_validate_sandbox() {
+    local sandbox_json="$1" profile_name="$2"
+    local errs
+    errs=$(jq -r '
+        def fs_check($k):
+          if has($k) then
+            if (.[$k]|type) != "array" then "sandbox.filesystem.\($k) must be an array of strings"
+            else (.[$k][] | select((type!="string") or (startswith("/")|not))
+                  | "sandbox.filesystem.\($k) must contain absolute paths (got \(@json))")
+            end
+          else empty end;
+        [ (if type!="object" then "sandbox must be a JSON object" else empty end),
+          (if type=="object" and length==0 then "sandbox block is empty; define filesystem and/or network" else empty end),
+          (if type=="object" then (keys_unsorted[] | select(.!="filesystem" and .!="network") | "unknown sandbox key: \(.)") else empty end),
+          (if type=="object" and has("filesystem") then
+             (if (.filesystem|type)!="object" then "sandbox.filesystem must be an object"
+              else (.filesystem | keys_unsorted[] | select(.!="allowWrite" and .!="denyWrite" and .!="allowRead") | "unknown sandbox.filesystem key: \(.)"),
+                   (.filesystem | fs_check("allowWrite")), (.filesystem | fs_check("denyWrite")), (.filesystem | fs_check("allowRead"))
+              end) else empty end),
+          (if type=="object" and has("network") then
+             (if (.network|type)!="object" then "sandbox.network must be an object"
+              else (.network | keys_unsorted[] | select(.!="allowedDomains") | "unknown sandbox.network key: \(.)"),
+                   (if (.network|has("allowedDomains")) then
+                      (if (.network.allowedDomains|type)!="array" then "sandbox.network.allowedDomains must be an array of strings"
+                       else (.network.allowedDomains[] | select((type!="string") or (.=="") or test("\\s")) | "sandbox.network.allowedDomains has invalid domain (got \(@json))") end)
+                    else empty end)
+              end) else empty end)
+        ] | .[]
+    ' <<< "$sandbox_json" 2>&1)
+    local rc=$?
+
+    if [ $rc -ne 0 ]; then
+        echo -e "${RED}Error:${NC} profile '${profile_name}' has malformed sandbox JSON: ${errs}" >&2
+        return 1
+    fi
+    if [ -n "$errs" ]; then
+        echo -e "${RED}Error:${NC} invalid sandbox block in profile '${profile_name}':" >&2
+        while IFS= read -r line; do
+            [ -n "$line" ] && echo "  - $line" >&2
+        done <<< "$errs"
+        return 1
+    fi
+    return 0
+}
+
+# Write a per-session settings file containing ONLY the sandbox block.
+# Produces exactly {"sandbox": <block>} so `claude --settings <file>` merges it.
+# Usage: cage_write_sandbox_settings "$settings_file" "$compact_sandbox_json"
+cage_write_sandbox_settings() {
+    local settings_file="$1" sandbox_json="$2"
+    jq -n --argjson sandbox "$sandbox_json" '{sandbox: $sandbox}' > "$settings_file"
+}

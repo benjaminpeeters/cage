@@ -72,13 +72,14 @@ cage_resume() {
     # Mode 1: Interactive (no prompt)
     if [ -z "$prompt" ]; then
         local meta_file=$(cage_get_session_file "$session" "meta.json")
-        local session_name="" profile="" orig_cwd="" orig_model=""
+        local session_name="" profile="" orig_cwd="" orig_model="" orig_effort=""
         if [ -f "$meta_file" ]; then
             eval "$(jq -r '
                 "session_name=" + (.name // "" | @sh) + " " +
                 "profile=" + (.profile // "" | @sh) + " " +
                 "orig_cwd=" + (.cwd // "" | @sh) + " " +
-                "orig_model=" + (.model // "sonnet" | @sh)
+                "orig_model=" + (.model // "sonnet" | @sh) + " " +
+                "orig_effort=" + (.effort // "xhigh" | @sh)
             ' "$meta_file" 2>/dev/null)"
         else
             echo -e "${YELLOW}Warning:${NC} metadata file missing for session $session"
@@ -89,11 +90,23 @@ cage_resume() {
         cage_print_session_header "$display" "$profile" "$orig_model" "${orig_cwd:-$(pwd)}"
         local effective_cwd
         if [ -n "$orig_cwd" ] && [ -d "$orig_cwd" ]; then effective_cwd="$orig_cwd"; else effective_cwd="$(pwd)"; fi
+
+        # Re-apply the original session's sandbox (stored in meta) for this resume.
+        # Empty array → zero args, so a sandbox-less session resumes byte-identically.
+        local orig_sandbox="" settings_file="" settings_args=()
+        [ -f "$meta_file" ] && orig_sandbox=$(jq -c '.sandbox // empty' "$meta_file")
+        if [ -n "$orig_sandbox" ]; then
+            cage_validate_sandbox "$orig_sandbox" "$session" || return 1
+            settings_file=$(cage_get_session_file "$session" "settings.json")
+            cage_write_sandbox_settings "$settings_file" "$orig_sandbox"
+            settings_args=(--settings "$settings_file")
+        fi
+
         local resume_pid_file=$(cage_get_session_file "$session" "pid")
         cage_interactive_start "$resume_pid_file"
         trap 'cage_interactive_end "$resume_pid_file"' EXIT
         trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$effective_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"})
+        (cd "$effective_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} "${settings_args[@]}")
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$resume_pid_file"
@@ -103,6 +116,7 @@ cage_resume() {
             cage_print_resume_hint "$session"
         else
             rm -f "$meta_file" "$status_file"
+            [ -n "$settings_file" ] && rm -f "$settings_file"
             echo -e "${YELLOW}Session $session had no conversation and has been removed.${NC}"
             echo -e "Start a new session: ${CYAN}cage new${NC}"
         fi
@@ -111,12 +125,19 @@ cage_resume() {
 
     # Mode 2: Non-interactive with prompt
     local meta_file=$(cage_get_session_file "$session" "meta.json")
-    local orig_profile orig_tools orig_model
+    local orig_profile orig_tools orig_model orig_effort
     eval "$(jq -r '
         "orig_profile=" + (.profile // "default" | @sh) + " " +
         "orig_tools=" + (.tools // "Bash,Write,Read,Edit,Glob,Grep" | @sh) + " " +
-        "orig_model=" + (.model // "sonnet" | @sh)
+        "orig_model=" + (.model // "sonnet" | @sh) + " " +
+        "orig_effort=" + (.effort // "xhigh" | @sh)
     ' "$meta_file" 2>/dev/null)"
+
+    # Carry the parent session's sandbox (stored in meta) into the new sub-session.
+    # Read shape matches the interactive path above (guarded, no error suppression).
+    local orig_sandbox=""
+    [ -f "$meta_file" ] && orig_sandbox=$(jq -c '.sandbox // empty' "$meta_file")
+    [ -n "$orig_sandbox" ] && { cage_validate_sandbox "$orig_sandbox" "$session" || return 1; }
 
     # Create new session for tracking
     local day=$(date +%Y-%m-%d)
@@ -132,6 +153,17 @@ cage_resume() {
     local result_file="${log_dir}/cage_${session_num}.result.json"
     local new_meta_file="${log_dir}/cage_${session_num}.meta.json"
     local status_file="${log_dir}/cage_${session_num}.status"
+
+    # Generate the per-session sandbox settings file for the new sub-session.
+    local settings_file="" settings_flag=""
+    if [ -n "$orig_sandbox" ]; then
+        settings_file="${log_dir}/cage_${session_num}.settings.json"
+        cage_write_sandbox_settings "$settings_file" "$orig_sandbox"
+        # The wrapper heredoc below is unquoted and interpolates this verbatim; the
+        # settings path is under /tmp/cage (no spaces) — the same invariant that
+        # $fork_flag and $output_flags already rely on for word-splitting.
+        settings_flag="--settings $settings_file"
+    fi
 
     # Build fork flag
     local fork_flag=""
@@ -153,10 +185,13 @@ cage_resume() {
         --arg task "$prompt" \
         --arg start_time "$(date -Iseconds)" \
         --arg model "$orig_model" \
+        --arg effort "$orig_effort" \
         --arg tools "$orig_tools" \
         --arg parent_session "$session" \
         --arg parent_uuid "$uuid" \
-        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, tools: $tools, parent_session: $parent_session, parent_uuid: $parent_uuid}' \
+        --argjson sandbox "${orig_sandbox:-null}" \
+        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, parent_session: $parent_session, parent_uuid: $parent_uuid}
+         + (if $sandbox != null then {sandbox: $sandbox} else {} end)' \
         > "$new_meta_file"
 
     # Create wrapper script
@@ -178,12 +213,18 @@ PID_FILE="$pid_file"
     echo "---"
 } > "\$LOG_FILE"
 
+# Headless: convert would-be permission asks to denies (see new.sh) so an
+# unanswerable prompt can't hang the background resume.
+export CAGE_HEADLESS=1
+
 OUTPUT=\$(claude -p "$prompt" \\
     --resume "$uuid" \\
     --name "$new_session" \\
     $fork_flag \\
     --model "$orig_model" \\
+    --effort "$orig_effort" \\
     --allowedTools "$orig_tools" \\
+    $settings_flag \\
     $output_flags 2>&1)
 EXIT_CODE=\$?
 

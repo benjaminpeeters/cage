@@ -1,0 +1,9 @@
+{
+  "description": "Modify cage itself",
+  "model": "opus[1m]",
+  "effort": "xhigh",
+  "tools": "Read,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(which:*),Bash(type:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(jq:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(git branch:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(awk:*),Bash(curl:*),Bash(ps:*),Bash(lsof:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(tac:*),Bash(nl:*),Bash(rev:*)",
+  "output": "markdown",
+  "cwd": "/home/bpeeters/MEGA/repo/claude/cage",
+  "system_prompt": ""
+}

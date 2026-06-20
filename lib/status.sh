@@ -198,7 +198,7 @@ _cage_status_list() {
         fi
     done
 
-    echo -e "${BOLD}${CYAN}=== Active Sessions ===${NC}"
+    echo -e "${BOLD}${PURPLE}=== Active Sessions ===${NC}"
     if [ ${#running_entries[@]} -eq 0 ]; then
         echo -e "${DIM}No active sessions${NC}"
     else

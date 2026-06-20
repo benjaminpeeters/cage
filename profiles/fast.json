@@ -1,7 +1,8 @@
 {
-  "description": "Lightweight toolset with haiku model",
-  "model": "haiku",
-  "tools": "Read,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(curl:*),Bash(which:*),Bash(type:*)",
+  "description": "Lightweight toolset",
+  "model": "sonnet",
+  "effort": "high",
+  "tools": "Read,Glob,Grep,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(curl:*),Bash(which:*),Bash(type:*),Bash(jq:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(awk:*),Bash(tac:*),Bash(nl:*),Bash(rev:*)",
   "output": "json",
   "cwd": "/tmp/cage",
   "system_prompt": ""
