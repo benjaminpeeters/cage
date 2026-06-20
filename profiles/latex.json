@@ -1,0 +1,9 @@
+{
+  "description": "LaTeX infrastructure: bp-latex classes/templates + bp-library bib/glossary",
+  "model": "opus[1m]",
+  "effort": "xhigh",
+  "tools": "Read,Glob,Grep,Write,Edit,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(which:*),Bash(type:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(jq:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(awk:*),Bash(tac:*),Bash(nl:*),Bash(rev:*),Bash(pdftotext:*),Bash(pdfinfo:*),Bash(pdflatex:*),Bash(latexmk:*),Bash(bibtex:*),Bash(makeindex:*)",
+  "output": "markdown",
+  "cwd": "/home/bpeeters/MEGA/repo/latex",
+  "system_prompt": "Work in the bp-latex LaTeX infrastructure at ~/MEGA/repo/latex/ (see ./CLAUDE.md and bp-latex/CLAUDE.md). bp-latex/ holds the document classes, modular packages, and templates; bp-library/ holds the central bibliographie.bib, glossary-entries.tex, and .bst styles. Papers consume bp-latex as a git submodule and build with latexmk (two passes for glossary/elsarticle references). Conventions: bp color prefix; keep \\bibliography a literal; load the glossary via \\loadglsentries; WHY-comments only, no tombstone comments. Edit the canonical repo here and build-verify class/template changes with latexmk on a throwaway document before committing. Consuming papers/slides (read-only references) live under ~/MEGA/repo/mindcet/tex/, ~/MEGA/pub/, and ~/MEGA/teaching/. bp-latex is a work in progress; see todo.md."
+}

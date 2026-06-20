@@ -65,6 +65,7 @@ Profiles are JSON files in `profiles/` defining model, effort, tools, output for
 | full | opus | All tools + TodoWrite | json | /tmp | All tools, complex multi-step tasks |
 | self | opus | Standard tools + git branch | markdown | cage repo | Modify cage itself |
 | settings | opus | Standard tools + Write, Edit, nvim, lua | markdown | ~/MEGA/config | Update host configs (Claude Code, WezTerm, Neovim, dotfiles) |
+| latex | opus | LaTeX toolchain + Write, Edit, git | markdown | ~/MEGA/repo/latex | bp-latex/bp-library LaTeX infrastructure |
 
 CWD `.` means the caller's working directory. `/tmp/cage` is an isolated directory.
 
