@@ -147,21 +147,26 @@ cage_new() {
         --arg tools "$tools" \
         --arg output "$output_format" \
         --arg cwd "$work_dir" \
+        --arg system_prompt "$sys_prompt" \
         --argjson sandbox "${PROF_SANDBOX:-null}" \
-        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, output: $output, cwd: $cwd}
+        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, output: $output, cwd: $cwd, system_prompt: $system_prompt}
          + (if $sandbox != null then {sandbox: $sandbox} else {} end)' \
         > "$meta_file"
 
     # Mode 1: Interactive (default)
     if [ "$print_mode" = false ]; then
         cage_print_session_header "$session_name ($session_id)" "$profile" "$model" "$work_dir"
-        # Empty array → zero args, so a sandbox-less profile launches byte-identically.
+        # Empty arrays → zero args, so a sandbox-less / prompt-less profile launches byte-identically.
         local settings_args=()
         [ "$PROF_HAS_SANDBOX" = true ] && settings_args=(--settings "$settings_file")
+        # Apply the profile's system prompt to the interactive session too. --append-system-prompt
+        # is additive (keeps Claude's defaults + CLAUDE.md) and applies for the whole session.
+        local sysprompt_args=()
+        [ -n "$sys_prompt" ] && sysprompt_args=(--append-system-prompt "$sys_prompt")
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" ${task:+"$task"})
+        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" ${task:+"$task"})
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$pid_file"
@@ -180,11 +185,9 @@ cage_new() {
     local md_mode=false
     [ "$output_format" = "markdown" ] && md_mode=true
 
-    # Build final task with system prompt
+    # The profile's system prompt is applied via --append-system-prompt (passed to the
+    # wrapper), the same mechanism as the interactive path — not prepended to the task.
     local final_task="$task"
-    [ -n "$sys_prompt" ] && final_task="$sys_prompt
-
-$task"
 
     # Build output flags based on mode
     local output_flags
@@ -217,11 +220,15 @@ SESSION_NAME="${11}"
 WORK_DIR="${12}"
 EFFORT="${13}"
 SETTINGS_FILE="${14}"
+SYS_PROMPT="${15}"
 
 # Per-session sandbox settings. Empty when the profile declares no sandbox block,
 # so the claude command below is byte-identical to a non-sandbox launch.
 SETTINGS_ARGS=()
 [ -n "$SETTINGS_FILE" ] && SETTINGS_ARGS=(--settings "$SETTINGS_FILE")
+# Profile system prompt, applied additively (same as the interactive path).
+APPEND_ARGS=()
+[ -n "$SYS_PROMPT" ] && APPEND_ARGS=(--append-system-prompt "$SYS_PROMPT")
 
 cd "$WORK_DIR" || exit 1
 
@@ -250,6 +257,7 @@ if [ "$MD_MODE" = "true" ]; then
         --effort "$EFFORT" \
         --allowedTools "$TOOLS" \
         "${SETTINGS_ARGS[@]}" \
+        "${APPEND_ARGS[@]}" \
         --output-format text >> "$LOG_FILE" 2>&1
     EXIT_CODE=$?
     # For markdown mode, copy log content to result (minus header)
@@ -262,6 +270,7 @@ else
         --effort "$EFFORT" \
         --allowedTools "$TOOLS" \
         "${SETTINGS_ARGS[@]}" \
+        "${APPEND_ARGS[@]}" \
         $OUTPUT_FLAGS 2>&1)
     EXIT_CODE=$?
     echo "$OUTPUT" >> "$LOG_FILE"
@@ -298,6 +307,7 @@ WRAPPER_EOF
         "$work_dir" \
         "$effort" \
         "$settings_file" \
+        "$sys_prompt" \
         < /dev/null > /dev/null 2>&1 &
 
     local pid=$!

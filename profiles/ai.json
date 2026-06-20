@@ -1,0 +1,23 @@
+{
+  "description": "Claude Code / AI infrastructure: dotfiles/ai (agents, skills, hooks, scripts, settings), the pre-commit pipeline, shell/ai, repo/claude tools, mindcet/macroverse integration",
+  "model": "opus[1m]",
+  "effort": "max",
+  "tools": "Read,Glob,Grep,Write,Edit,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(which:*),Bash(type:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(jq:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(git branch:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(awk:*),Bash(tac:*),Bash(nl:*),Bash(rev:*)",
+  "output": "markdown",
+  "cwd": "/home/bpeeters/MEGA/config/dotfiles/ai",
+  "system_prompt": "You work on Benjamin's Claude Code / AI infrastructure. BEFORE doing anything, read IN FULL: /home/bpeeters/MEGA/config/dotfiles/ai/ARCHITECTURE.md (the infra map) and /home/bpeeters/MEGA/config/dotfiles/ai/TODO.md (open work). cwd is dotfiles/ai/ — the canonical source: agents/ (subagents incl. the pre-commit critics/synths), commands/ (the /lop and /r skills), hooks/ (mode-policy.sh and others), rules/, scripts/ (precommit_io.sh, precommit_dispatch.sh, settings_lint.sh), settings.json, and CLAUDE.md (the global user memory). You may also edit dotfiles/shell/ai/ (the claude_* launchers, run_unanalyzable), repo/claude/ (cage, librarian, and the other tools), and the mindcet/macroverse .claude_<project>/ control planes; everything under ~/MEGA is readable for reference. Use this to add or improve skills, agents, hooks, the /lop:pre-commit pipeline and other complex pipelines, settings, the user-level CLAUDE.md, and to work the AI TODOs. Rules: verify Claude Code feature syntax and behavior with the claude-code-guide agent and the official docs before introducing settings keys, hook wiring, or CLI flags — never assume. After hook/settings changes, run hooks/tests/ and scripts/settings_lint.sh. Adding a skill/agent/rule that must appear in a project means re-running that project's init_symlinks.sh. Edit the dotfile sources, never the ~/.claude symlink targets. settings.json is sandbox-deny-listed — change it deliberately and validate it. Commits are normally made from a normal shell session (cwd is a subdir of the dotfiles repo). Follow the commit-msg convention and record deferred work in TODO.md.",
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "/home/bpeeters/MEGA/config/dotfiles/shell/ai",
+        "/home/bpeeters/MEGA/config/dotfiles/shell/ai/**",
+        "/home/bpeeters/MEGA/repo/claude",
+        "/home/bpeeters/MEGA/repo/claude/**",
+        "/home/bpeeters/MEGA/repo/mindcet/.claude_mindcet",
+        "/home/bpeeters/MEGA/repo/mindcet/.claude_mindcet/**",
+        "/home/bpeeters/MEGA/repo/macroverse/.claude_macroverse",
+        "/home/bpeeters/MEGA/repo/macroverse/.claude_macroverse/**"
+      ]
+    }
+  }
+}

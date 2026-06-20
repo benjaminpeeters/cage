@@ -72,14 +72,15 @@ cage_resume() {
     # Mode 1: Interactive (no prompt)
     if [ -z "$prompt" ]; then
         local meta_file=$(cage_get_session_file "$session" "meta.json")
-        local session_name="" profile="" orig_cwd="" orig_model="" orig_effort=""
+        local session_name="" profile="" orig_cwd="" orig_model="" orig_effort="" orig_sys_prompt=""
         if [ -f "$meta_file" ]; then
             eval "$(jq -r '
                 "session_name=" + (.name // "" | @sh) + " " +
                 "profile=" + (.profile // "" | @sh) + " " +
                 "orig_cwd=" + (.cwd // "" | @sh) + " " +
                 "orig_model=" + (.model // "sonnet" | @sh) + " " +
-                "orig_effort=" + (.effort // "xhigh" | @sh)
+                "orig_effort=" + (.effort // "xhigh" | @sh) + " " +
+                "orig_sys_prompt=" + (.system_prompt // "" | @sh)
             ' "$meta_file" 2>/dev/null)"
         else
             echo -e "${YELLOW}Warning:${NC} metadata file missing for session $session"
@@ -102,11 +103,16 @@ cage_resume() {
             settings_args=(--settings "$settings_file")
         fi
 
+        # Re-apply the profile's system prompt (read from meta above). --append-system-prompt
+        # is per-invocation, so a resume must re-pass it to keep the standing instructions.
+        local sysprompt_args=()
+        [ -n "$orig_sys_prompt" ] && sysprompt_args=(--append-system-prompt "$orig_sys_prompt")
+
         local resume_pid_file=$(cage_get_session_file "$session" "pid")
         cage_interactive_start "$resume_pid_file"
         trap 'cage_interactive_end "$resume_pid_file"' EXIT
         trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$effective_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} "${settings_args[@]}")
+        (cd "$effective_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} "${settings_args[@]}" "${sysprompt_args[@]}")
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$resume_pid_file"
@@ -125,12 +131,13 @@ cage_resume() {
 
     # Mode 2: Non-interactive with prompt
     local meta_file=$(cage_get_session_file "$session" "meta.json")
-    local orig_profile orig_tools orig_model orig_effort
+    local orig_profile orig_tools orig_model orig_effort orig_sys_prompt=""
     eval "$(jq -r '
         "orig_profile=" + (.profile // "default" | @sh) + " " +
         "orig_tools=" + (.tools // "Bash,Write,Read,Edit,Glob,Grep" | @sh) + " " +
         "orig_model=" + (.model // "sonnet" | @sh) + " " +
-        "orig_effort=" + (.effort // "xhigh" | @sh)
+        "orig_effort=" + (.effort // "xhigh" | @sh) + " " +
+        "orig_sys_prompt=" + (.system_prompt // "" | @sh)
     ' "$meta_file" 2>/dev/null)"
 
     # Carry the parent session's sandbox (stored in meta) into the new sub-session.
@@ -165,6 +172,17 @@ cage_resume() {
         settings_flag="--settings $settings_file"
     fi
 
+    # Re-apply the profile's system prompt to the -p run. --append-system-prompt is
+    # per-invocation and is NOT stored in the resumed transcript, so it must be re-passed
+    # (same as interactive resume). The prompt may be multi-line, so it is written to a file
+    # and read at wrapper runtime — only the space-free file path is interpolated.
+    local sysprompt_file="" append_flag=""
+    if [ -n "$orig_sys_prompt" ]; then
+        sysprompt_file="${log_dir}/cage_${session_num}.sysprompt"
+        printf '%s' "$orig_sys_prompt" > "$sysprompt_file"
+        append_flag="--append-system-prompt \"\$(cat '$sysprompt_file')\""
+    fi
+
     # Build fork flag
     local fork_flag=""
     [ "$fork_mode" = true ] && fork_flag="--fork-session"
@@ -189,8 +207,9 @@ cage_resume() {
         --arg tools "$orig_tools" \
         --arg parent_session "$session" \
         --arg parent_uuid "$uuid" \
+        --arg system_prompt "$orig_sys_prompt" \
         --argjson sandbox "${orig_sandbox:-null}" \
-        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, parent_session: $parent_session, parent_uuid: $parent_uuid}
+        '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, parent_session: $parent_session, parent_uuid: $parent_uuid, system_prompt: $system_prompt}
          + (if $sandbox != null then {sandbox: $sandbox} else {} end)' \
         > "$new_meta_file"
 
@@ -225,6 +244,7 @@ OUTPUT=\$(claude -p "$prompt" \\
     --effort "$orig_effort" \\
     --allowedTools "$orig_tools" \\
     $settings_flag \\
+    $append_flag \\
     $output_flags 2>&1)
 EXIT_CODE=\$?
 

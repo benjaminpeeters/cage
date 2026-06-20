@@ -66,8 +66,11 @@ Profiles are JSON files in `profiles/` defining model, effort, tools, output for
 | self | opus | Standard tools + git branch | markdown | cage repo | Modify cage itself |
 | settings | opus | Standard tools + Write, Edit, nvim, lua | markdown | ~/MEGA/config | Update host configs (Claude Code, WezTerm, Neovim, dotfiles) |
 | latex | opus | LaTeX toolchain + Write, Edit, git | markdown | ~/MEGA/repo/latex | bp-latex/bp-library LaTeX infrastructure |
+| ai | opus | Read/Write/Edit/Grep + git + jq | markdown | ~/MEGA/config/dotfiles/ai | Claude Code / AI infrastructure (skills, agents, hooks, pre-commit) |
 
 CWD `.` means the caller's working directory. `/tmp/cage` is an isolated directory.
+
+A profile's `system_prompt` applies in both interactive and background sessions: it is passed to `claude` via `--append-system-prompt` (additive — Claude's defaults and CLAUDE.md still load). Because the flag is per-invocation, `cage resume` re-applies the stored prompt automatically.
 
 ### Per-profile sandbox
 
