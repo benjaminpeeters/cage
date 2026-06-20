@@ -40,7 +40,6 @@ See 'cage profile' for full profile management.
 Examples:
   cage new "Fix the bug in auth.py"
   cage new fast "Quick question about this code"
-  cage new explore "Map out the auth module"
   cage new -p web "What are best practices for X?"
   cage new -m 'opus[1m]' "Complex refactoring task"
   cage new -pt "Explain this codebase"

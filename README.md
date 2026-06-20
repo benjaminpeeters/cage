@@ -61,8 +61,6 @@ Profiles are JSON files in `profiles/` defining model, effort, tools, output for
 |---------|-------|-------|--------|-----|---------|
 | default | opus | All standard tools | markdown | /tmp/cage | General purpose |
 | fast | sonnet | Basic tools | json | /tmp/cage | Lightweight, speed-optimized |
-| explore | opus | Glob, Grep, Read, limited Bash | markdown | . | Read-only codebase exploration |
-| write | opus | Read, Write, Edit, Glob, Grep, Bash | json | . | Code modification |
 | web | opus | Read, Glob, Grep, WebSearch, WebFetch | markdown | /tmp/cage | Online research |
 | full | opus | All tools + TodoWrite | json | /tmp | All tools, complex multi-step tasks |
 | self | opus | Standard tools + git branch | markdown | cage repo | Modify cage itself |
