@@ -227,15 +227,29 @@ cage_load_profile() {
         return 1
     fi
 
-    eval "$(jq -r '
+    # Checked jq: on malformed JSON an unchecked eval would silently keep the
+    # PROF_* globals empty — or stale from a previous load — and cage new
+    # would launch claude with the wrong configuration instead of failing.
+    local prof_fields
+    prof_fields=$(jq -r '
         "PROF_DESCRIPTION=" + (.description // "" | @sh) + " " +
         "PROF_MODEL=" + (.model // "sonnet" | @sh) + " " +
         "PROF_EFFORT=" + (.effort // "xhigh" | @sh) + " " +
-        "PROF_TOOLS=" + (.tools // "Bash,Write,Read,Edit,Glob,Grep" | @sh) + " " +
+        "PROF_TOOLS=" + (.tools // "" | @sh) + " " +
         "PROF_OUTPUT=" + (.output // "json" | @sh) + " " +
         "PROF_CWD=" + (.cwd // "." | @sh) + " " +
         "PROF_SYSTEM_PROMPT=" + (.system_prompt // "" | @sh)
-    ' "$profile_file")"
+    ' "$profile_file") || {
+        echo -e "${RED}Error:${NC} malformed profile JSON: $profile_file" >&2
+        return 1
+    }
+    eval "$prof_fields"
+    # A profile must declare its toolset explicitly; substituting one here
+    # would hand a full toolset (including shell) to a profile that lost it
+    if [ -z "$PROF_TOOLS" ]; then
+        echo -e "${RED}Error:${NC} profile '$name' declares no tools: $profile_file" >&2
+        return 1
+    fi
 
     # Optional sandbox block (compact JSON). "// empty" yields "" for a missing key
     # or an explicit null. When present, validate at load time and fail loud.
@@ -398,12 +412,12 @@ cage_profile() {
         show)
             local name="$1"
             if [ -z "$name" ]; then
-                echo "Usage: cage profile show <name>"
+                echo "Usage: cage profile show <name>" >&2
                 return 1
             fi
             local profile_file="$CAGE_PROFILES_DIR/${name}.json"
             if [ ! -f "$profile_file" ]; then
-                echo -e "${RED}Error:${NC} Profile not found: $name"
+                echo -e "${RED}Error:${NC} Profile not found: $name" >&2
                 return 1
             fi
             cage_load_profile "$name" || return 1
@@ -420,12 +434,12 @@ cage_profile() {
         edit)
             local name="$1"
             if [ -z "$name" ]; then
-                echo "Usage: cage profile edit <name>"
+                echo "Usage: cage profile edit <name>" >&2
                 return 1
             fi
             local profile_file="$CAGE_PROFILES_DIR/${name}.json"
             if [ ! -f "$profile_file" ]; then
-                echo -e "${RED}Error:${NC} Profile not found: $name"
+                echo -e "${RED}Error:${NC} Profile not found: $name" >&2
                 return 1
             fi
             _cage_profile_edit_interactive "$name"
@@ -433,7 +447,7 @@ cage_profile() {
         create)
             local name="$1"
             if [ -z "$name" ]; then
-                echo "Usage: cage profile create <name>"
+                echo "Usage: cage profile create <name>" >&2
                 return 1
             fi
             local profile_file="$CAGE_PROFILES_DIR/${name}.json"
@@ -452,12 +466,12 @@ cage_profile() {
         delete)
             local name="$1"
             if [ -z "$name" ]; then
-                echo "Usage: cage profile delete <name>"
+                echo "Usage: cage profile delete <name>" >&2
                 return 1
             fi
             local profile_file="$CAGE_PROFILES_DIR/${name}.json"
             if [ ! -f "$profile_file" ]; then
-                echo -e "${RED}Error:${NC} Profile not found: $name"
+                echo -e "${RED}Error:${NC} Profile not found: $name" >&2
                 return 1
             fi
             if gum confirm "Delete profile '$name'?"; then
@@ -476,7 +490,7 @@ cage_profile() {
             if [ -f "$profile_file" ]; then
                 cage_profile show "$cmd"
             else
-                echo "Unknown command: $cmd"
+                echo -e "${RED}Error:${NC} unknown command: $cmd" >&2
                 _cage_profile_help
                 return 1
             fi

@@ -14,7 +14,7 @@ cage result - Read session result JSON
 Usage: cage result <session> [field]
 
 Arguments:
-  session    Session ID (S0_1, cage_2026-01-05_1, etc.)
+  session    Session reference (s0-1, cage-2026-01-05-1, a UUID, or a /rename'd name)
   field      Optional jq field selector (.status, .data.key, etc.)
 
 Result JSON Schema:
@@ -30,11 +30,11 @@ Result JSON Schema:
 }
 
 Examples:
-  cage result S0_1                # Full JSON
-  cage result S0_1 .status        # "success", "error", or "partial"
-  cage result S0_1 .summary       # Summary text
-  cage result S0_1 .files_created # Array of created files
-  cage result S0_1 .data.key      # Nested field
+  cage result s0-1                # Full JSON
+  cage result s0-1 .status        # "success", "error", or "partial"
+  cage result s0-1 .summary       # Summary text
+  cage result s0-1 .files_created # Array of created files
+  cage result s0-1 .data.key      # Nested field
 EOF
         return 0
     fi
@@ -42,13 +42,16 @@ EOF
     local result_file=$(cage_get_session_file "$session" "result.json")
 
     if [ ! -f "$result_file" ]; then
-        echo "{}"
+        echo -e "${RED}Error:${NC} no result for session $session ($result_file)" >&2
         return 1
     fi
 
+    # claude --output-format json wraps the schema'd payload in a result
+    # envelope under .structured_output; unwrap so fields match the schema
+    # documented above (files that already hold the bare payload pass through).
     if [ -n "$field" ]; then
-        jq -r "$field" "$result_file"
+        jq -r ".structured_output // . | $field" "$result_file"
     else
-        jq '.' "$result_file"
+        jq '.structured_output // .' "$result_file"
     fi
 }

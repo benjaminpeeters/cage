@@ -18,9 +18,12 @@ if [ "$BASH_VERSION_NUM" -lt 4 ]; then
     echo "Warning: bash 4.0+ recommended (found $BASH_VERSION)"
 fi
 
-# Check for GNU getopt (returns exit code 4 when enhanced getopt is present)
-getopt -T >/dev/null 2>&1
-if [ $? -ne 4 ]; then
+# Check for GNU getopt (returns exit code 4 when enhanced getopt is present).
+# The probe must not run as a bare statement: under `set -e` its non-zero
+# "success" code (4) would kill the script before the check below runs.
+getopt_rc=0
+getopt -T >/dev/null 2>&1 || getopt_rc=$?
+if [ "$getopt_rc" -ne 4 ]; then
     echo "Warning: GNU getopt not found."
     echo "On macOS: brew install gnu-getopt"
     echo "Then add to your shell config:"
@@ -35,6 +38,17 @@ fi
 # Check for uuidgen
 if ! command -v uuidgen >/dev/null 2>&1; then
     echo "Warning: uuidgen not found. Install with your package manager."
+fi
+
+# Check for gum (interactive profile editor, resume picker, clean confirmation)
+if ! command -v gum >/dev/null 2>&1; then
+    echo "Warning: gum not found (needed by 'cage resume' picker, 'cage profile edit', 'cage clean')."
+    echo "Install: https://github.com/charmbracelet/gum"
+fi
+
+# Check for batcat (cage tail renders logs through it)
+if ! command -v batcat >/dev/null 2>&1; then
+    echo "Warning: batcat not found (needed by 'cage tail'). Install the bat package."
 fi
 
 # Create bin directory if needed

@@ -13,19 +13,24 @@ cage tail - Tail session log
 Usage: cage tail <session>
 
 Arguments:
-  session    Session ID (S0_1, cage_2026-01-05_1, etc.)
+  session    Session reference (s0-1, cage-2026-01-05-1, a UUID, or a /rename'd name)
 
 Examples:
-  cage tail S0_1
-  cage tail cage_2026-01-05_1
+  cage tail s0-1
+  cage tail cage-2026-01-05-1
 EOF
         return 0
     fi
 
+    command -v batcat >/dev/null 2>&1 || {
+        echo -e "${RED}Error:${NC} batcat is required by cage tail (install the bat package)" >&2
+        return 1
+    }
+
     local log_file=$(cage_get_session_file "$session" "log")
 
     if [ ! -f "$log_file" ]; then
-        echo -e "${RED}Error:${NC} Log file not found: $log_file"
+        echo -e "${RED}Error:${NC} Log file not found: $log_file" >&2
         return 1
     fi
 

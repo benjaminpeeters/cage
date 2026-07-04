@@ -54,6 +54,10 @@ cage_main() {
             source "$CAGE_ROOT/lib/check.sh"
             cage_check "$@"
             ;;
+        clean)
+            source "$CAGE_ROOT/lib/clean.sh"
+            cage_clean "$@"
+            ;;
         profile)
             source "$CAGE_ROOT/lib/profile.sh"
             cage_profile "$@"
@@ -66,21 +70,26 @@ Usage: cage <command> [options]
 
 Commands:
   new      Start new session (background with -p)
-  resume   Resume existing session (interactive or with -p)
+  resume   Resume session (no arg: interactive picker; accepts codes, names, UUIDs)
   status   List sessions
   result   Read session result JSON
   tail     Tail session log
   meta     Read session metadata
   kill     Kill running session
   check    Open session log in nvim
+  clean    Prune registry entries (expired / near-empty / pick / by-age)
   profile  List, show, edit, or create profiles
+
+Interactive sessions end with your shell cd'd into the session's working
+directory (via the cage() shell wrapper — deliberately un-Unix; use
+'command cage' to opt out).
 
 Run 'cage <command> --help' for command-specific help.
 EOF
             ;;
         *)
-            echo "Unknown command: $cmd"
-            echo "Run 'cage help' for usage."
+            echo "Unknown command: $cmd" >&2
+            echo "Run 'cage help' for usage." >&2
             return 1
             ;;
     esac

@@ -13,6 +13,10 @@ Usage: cage new [options] [profile] "task"
 By default, starts an interactive foreground session.
 With -p, runs non-interactively in the background.
 
+When an interactive session ends, your shell cd's into the session's working
+directory (via the cage() shell wrapper; deliberately not standard Unix
+child-process behavior — 'command cage' bypasses it).
+
 Options:
   -p, --print          Non-interactive background mode (like claude -p)
   -m, --model MODEL    Model override (opus[1m], sonnet, haiku)
@@ -74,6 +78,14 @@ cage_new() {
         esac
     done
 
+    # Background-only flags are meaningless without -p — refuse loudly
+    if [ "$print_mode" = false ]; then
+        if [ "$tail_mode" = true ] || [ -n "$output_override" ] || [ -n "$result_file" ]; then
+            echo -e "${RED}Error:${NC} --tail/--md/--json/--result-file require -p" >&2
+            return 1
+        fi
+    fi
+
     # Load profile module
     source "$CAGE_ROOT/lib/profile.sh"
 
@@ -106,19 +118,16 @@ cage_new() {
     [ -n "$model_override" ] && model="$model_override"
     [ -n "$output_override" ] && output_format="$output_override"
 
-    # Generate UUID for session tracking
-    local uuid=$(uuidgen)
-
-    # Create organized log directory structure
-    local day=$(date +%Y-%m-%d)
-    local log_dir="${CAGE_STORAGE}/${day}"
-    mkdir -p "$log_dir"
-
-    # Find next session number for today
-    local session_num=$(cage_next_session_num)
-
-    local session_name="cage_${day}_${session_num}"
-    local session_id="S0_${session_num}"
+    # Allocate today's session slot (dated dir, number, handle, uuid) in one
+    # consistent step — a midnight boundary cannot split the day and numbering
+    cage_alloc_session
+    local uuid="$_cage_uuid"
+    local log_dir="$_cage_log_dir"
+    local session_num="$_cage_session_num"
+    local session_name="$_cage_session_name"
+    # Display-only relative code: it rots at midnight, so every printed resume
+    # hint uses $session_name instead.
+    local session_id="s0-${session_num}"
     local log_file="${log_dir}/cage_${session_num}.log"
     local pid_file="${log_dir}/cage_${session_num}.pid"
     local meta_file="${log_dir}/cage_${session_num}.meta.json"
@@ -163,6 +172,7 @@ cage_new() {
         # is additive (keeps Claude's defaults + CLAUDE.md) and applies for the whole session.
         local sysprompt_args=()
         [ -n "$sys_prompt" ] && sysprompt_args=(--append-system-prompt "$sys_prompt")
+        cage_write_cwd_handoff "$work_dir"
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
@@ -170,12 +180,23 @@ cage_new() {
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$pid_file"
-        if cage_has_conversation "$work_dir" "$uuid"; then
+        # Empty = no real user prompt ever sent. Transcript existence stopped
+        # being the signal: claude writes the file at launch for the --name
+        # title record even when the session is closed immediately.
+        if cage_session_context "$work_dir" "$uuid" >/dev/null; then
             echo "$_exit_code" > "$status_file"
-            cage_print_resume_hint "$session_id"
+            # Near-empty sessions get offered for immediate cleanup (Enter =
+            # clean) so test debris never accumulates in the registry
+            if [ -t 0 ] && cage_is_near_empty "$work_dir" "$uuid" "$meta_file"; then
+                if gum confirm --affirmative "Clean" --negative "Keep" "Near-empty session (single short prompt) — clean it now?"; then
+                    cage_remove_session_files "$meta_file"
+                    echo -e "${DIM}Near-empty session removed.${NC}"
+                    return $_exit_code
+                fi
+            fi
+            cage_print_resume_hint "$session_name"
         else
-            rm -f "$meta_file" "$status_file"
-            [ -n "$settings_file" ] && rm -f "$settings_file"
+            cage_remove_session_files "$meta_file"
             echo -e "${DIM}Empty session removed.${NC}"
         fi
         return $_exit_code
@@ -324,14 +345,14 @@ WRAPPER_EOF
     echo -e "${BOLD}Commands:${NC}"
     echo -e "  ${BLUE}Check logs:${NC}    tail -f $log_file"
     echo -e "  ${BLUE}Check status:${NC}  cage status"
-    echo -e "  ${BLUE}Read result:${NC}   cage result $session_id"
-    echo -e "  ${BLUE}Resume later:${NC}  cage resume $session_id"
-    echo -e "  ${BLUE}Kill process:${NC}  cage kill $session_id"
+    echo -e "  ${BLUE}Read result:${NC}   cage result $session_name"
+    echo -e "  ${BLUE}Resume later:${NC}  cage resume $session_name"
+    echo -e "  ${BLUE}Kill process:${NC}  cage kill $session_name"
 
     # If tail mode is enabled, launch cage tail after a brief pause
     if [ "$tail_mode" = true ]; then
         echo ""
         source "$CAGE_ROOT/lib/tail.sh"
-        cage_tail "$session_id"
+        cage_tail "$session_name"
     fi
 }

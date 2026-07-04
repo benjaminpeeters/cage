@@ -14,7 +14,7 @@ cage meta - Read session metadata
 Usage: cage meta <session> [field]
 
 Arguments:
-  session    Session ID (S0_1, cage_2026-01-05_1, etc.)
+  session    Session reference (s0-1, cage-2026-01-05-1, a UUID, or a /rename'd name)
   field      Optional jq field selector (.uuid, .profile, etc.)
 
 Metadata Fields:
@@ -26,9 +26,9 @@ Metadata Fields:
   tools       Allowed tools
 
 Examples:
-  cage meta S0_1           # Full metadata
-  cage meta S0_1 .uuid     # Just the UUID
-  cage meta S0_1 .profile  # Profile name
+  cage meta s0-1           # Full metadata
+  cage meta s0-1 .uuid     # Just the UUID
+  cage meta s0-1 .profile  # Profile name
 EOF
         return 0
     fi
@@ -36,7 +36,7 @@ EOF
     local meta_file=$(cage_get_session_file "$session" "meta.json")
 
     if [ ! -f "$meta_file" ]; then
-        echo "{}"
+        echo -e "${RED}Error:${NC} no metadata for session $session ($meta_file)" >&2
         return 1
     fi
 
