@@ -297,6 +297,13 @@ _cage_profile_save() {
         > "$profile_file"
 }
 
+# Read the allowUnsandboxedCommands flag from a sandbox block (compact JSON or
+# empty string). Prints "true" or "false"; empty input reads as "false".
+_cage_sandbox_unsandboxed() {
+    [ -z "$1" ] && { echo "false"; return; }
+    jq -r '.allowUnsandboxedCommands // false' <<< "$1"
+}
+
 # Interactive profile editor using gum
 _cage_profile_edit_interactive() {
     local name="$1"
@@ -313,6 +320,8 @@ _cage_profile_edit_interactive() {
         # Build menu with current values
         local sandbox_summary="(none)"
         [ "$PROF_HAS_SANDBOX" = true ] && sandbox_summary="$PROF_SANDBOX"
+        local unsandboxed_summary
+        unsandboxed_summary=$(_cage_sandbox_unsandboxed "$PROF_SANDBOX")
         local choice
         choice=$(gum choose \
             "Description:    $PROF_DESCRIPTION" \
@@ -323,6 +332,7 @@ _cage_profile_edit_interactive() {
             "CWD:            $PROF_CWD" \
             "System prompt:  ${PROF_SYSTEM_PROMPT:-(none)}" \
             "Sandbox:        ${sandbox_summary}" \
+            "Unsandboxed:    ${unsandboxed_summary}" \
             "Save and exit" \
             "Cancel")
 
@@ -380,6 +390,33 @@ _cage_profile_edit_interactive() {
                     fi
                 fi
                 ;;
+            "Unsandboxed:"*)
+                # Per-command sandbox escape. The flag lives inside the sandbox
+                # block (it is a Claude Code sandbox.* setting); toggling it on
+                # creates a bare block if none exists, toggling it off drops the
+                # key and the whole block if that key was all it held.
+                local new_unsandboxed
+                new_unsandboxed=$(gum choose --header "Allow per-command sandbox escape (dangerouslyDisableSandbox)?" "false" "true")
+                if [ $? -eq 0 ] && [ -n "$new_unsandboxed" ]; then
+                    if [ "$new_unsandboxed" = "true" ]; then
+                        if [ -z "$PROF_SANDBOX" ]; then
+                            PROF_SANDBOX='{"allowUnsandboxedCommands":true}'
+                        else
+                            PROF_SANDBOX=$(jq -c '.allowUnsandboxedCommands=true' <<< "$PROF_SANDBOX")
+                        fi
+                        PROF_HAS_SANDBOX=true
+                    elif [ -n "$PROF_SANDBOX" ]; then
+                        local stripped
+                        stripped=$(jq -c 'del(.allowUnsandboxedCommands)' <<< "$PROF_SANDBOX")
+                        if [ "$stripped" = "{}" ]; then
+                            PROF_SANDBOX=""
+                            PROF_HAS_SANDBOX=false
+                        else
+                            PROF_SANDBOX="$stripped"
+                        fi
+                    fi
+                fi
+                ;;
             "Save and exit")
                 _cage_profile_save "$profile_file"
                 echo -e "${GREEN}✓${NC} Profile saved: $name"
@@ -429,6 +466,8 @@ cage_profile() {
             echo -e "  ${DIM}CWD:${NC}           $PROF_CWD"
             echo -e "  ${DIM}Tools:${NC}         $PROF_TOOLS"
             [ "$PROF_HAS_SANDBOX" = true ] && echo -e "  ${DIM}Sandbox:${NC}       ${PROF_SANDBOX}"
+            [ "$(_cage_sandbox_unsandboxed "$PROF_SANDBOX")" = "true" ] && \
+                echo -e "  ${DIM}Unsandboxed:${NC}   ${YELLOW}true${NC} ${DIM}(per-command escape via dangerouslyDisableSandbox)${NC}"
             [ -n "$PROF_SYSTEM_PROMPT" ] && echo -e "  ${DIM}System prompt:${NC} ${PROF_SYSTEM_PROMPT}"
             ;;
         edit)

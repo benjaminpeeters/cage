@@ -100,11 +100,16 @@ A profile may declare an optional `sandbox` block to widen its own bubblewrap sa
 ```json
 "sandbox": {
   "filesystem": { "allowWrite": [...], "denyWrite": [...], "allowRead": [...] },
-  "network":    { "allowedDomains": [...] }
+  "network":    { "allowedDomains": [...] },
+  "allowUnsandboxedCommands": true
 }
 ```
 
-Filesystem entries must be absolute paths; domains must be non-empty. When present, cage writes a per-session `cage_N.settings.json` containing exactly that block and launches with `claude --settings <file>` (sandbox arrays merge across scopes). Profiles without a `sandbox` block launch unchanged. The `settings` profile uses this to grant nvim its write paths so it can run `nvim --headless` config validation.
+Filesystem entries must be absolute paths; domains must be non-empty. When present, cage writes a per-session `cage_N.settings.json` containing exactly that block and launches with `claude --settings <file>` (sandbox arrays merge across scopes). Profiles without a `sandbox` block launch unchanged.
+
+The optional `allowUnsandboxedCommands` boolean is a per-command escape hatch: with it `true`, the session's agent can run individual Bash commands outside the jail via the tool's `dangerouslyDisableSandbox` parameter, while the sandbox otherwise stays on. Unlike the filesystem/network arrays (which only ever *widen* by union), this scalar *overrides* the global setting for that session. Toggle it per profile via `cage profile edit` (the `Unsandboxed:` option) rather than hand-editing JSON.
+
+The `settings` profile uses both levers: it grants nvim its write paths (so it can run `nvim --headless` config validation) and sets `allowUnsandboxedCommands: true` for the occasional command that must reach outside the jail.
 
 ## Session references
 

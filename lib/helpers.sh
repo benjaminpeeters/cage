@@ -504,8 +504,10 @@ cage_load_resume_meta() {
 
 # Validate a profile's sandbox block (compact JSON string).
 # Allowed shape: {"filesystem":{"allowWrite":[],"denyWrite":[],"allowRead":[]},
-#                 "network":{"allowedDomains":[]}}
-# Filesystem entries must be absolute paths; domains must be non-empty/whitespace-free.
+#                 "network":{"allowedDomains":[]},
+#                 "allowUnsandboxedCommands":true}
+# Filesystem entries must be absolute paths; domains must be non-empty/whitespace-free;
+# allowUnsandboxedCommands must be a boolean.
 # Prints one clear error per problem to stderr; returns 1 on any problem, 0 if valid.
 # Usage: cage_validate_sandbox "$compact_json" "$profile_name"
 cage_validate_sandbox() {
@@ -520,8 +522,9 @@ cage_validate_sandbox() {
             end
           else empty end;
         [ (if type!="object" then "sandbox must be a JSON object" else empty end),
-          (if type=="object" and length==0 then "sandbox block is empty; define filesystem and/or network" else empty end),
-          (if type=="object" then (keys_unsorted[] | select(.!="filesystem" and .!="network") | "unknown sandbox key: \(.)") else empty end),
+          (if type=="object" and length==0 then "sandbox block is empty; define filesystem, network, and/or allowUnsandboxedCommands" else empty end),
+          (if type=="object" then (keys_unsorted[] | select(.!="filesystem" and .!="network" and .!="allowUnsandboxedCommands") | "unknown sandbox key: \(.)") else empty end),
+          (if type=="object" and has("allowUnsandboxedCommands") and (.allowUnsandboxedCommands|type)!="boolean" then "sandbox.allowUnsandboxedCommands must be a boolean" else empty end),
           (if type=="object" and has("filesystem") then
              (if (.filesystem|type)!="object" then "sandbox.filesystem must be an object"
               else (.filesystem | keys_unsorted[] | select(.!="allowWrite" and .!="denyWrite" and .!="allowRead") | "unknown sandbox.filesystem key: \(.)"),
