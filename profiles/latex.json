@@ -1,7 +1,7 @@
 {
   "description": "LaTeX infrastructure: bp-latex classes/templates + bp-library bib/glossary",
-  "model": "opus[1m]",
-  "effort": "xhigh",
+  "model": "claude-opus-5-5[1m]",
+  "effort": "high",
   "tools": "Read,Glob,Grep,Write,Edit,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(tree:*),Bash(du:*),Bash(df:*),Bash(which:*),Bash(type:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(jq:*),Bash(xxd:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(awk:*),Bash(tac:*),Bash(nl:*),Bash(rev:*),Bash(pdftotext:*),Bash(pdfinfo:*),Bash(pdflatex:*),Bash(latexmk:*),Bash(bibtex:*),Bash(makeindex:*)",
   "output": "markdown",
   "cwd": "/home/bpeeters/MEGA/repo/latex",

@@ -80,14 +80,16 @@ Profiles are JSON files in `profiles/` defining model, effort, tools, output for
 
 | Profile | Model | Tools | Output | CWD | Purpose |
 |---------|-------|-------|--------|-----|---------|
-| default | opus | All standard tools | markdown | /tmp/cage | General purpose |
-| fast | sonnet | Basic tools | json | /tmp/cage | Lightweight, speed-optimized |
-| web | opus | Read, Glob, Grep, WebSearch, WebFetch | markdown | /tmp/cage | Online research |
-| full | opus | All tools + TodoWrite | json | /tmp | All tools, complex multi-step tasks |
-| self | opus | Standard tools + git branch | markdown | cage repo | Modify cage itself |
-| settings | opus | Standard tools + Write, Edit, nvim, lua | markdown | ~/MEGA/config | Update host configs (Claude Code, WezTerm, Neovim, dotfiles) |
-| latex | opus | LaTeX toolchain + Write, Edit, git | markdown | ~/MEGA/repo/latex | bp-latex/bp-library LaTeX infrastructure |
-| ai | opus | Read/Write/Edit/Grep + git + jq | markdown | ~/MEGA/config/dotfiles/ai | Claude Code / AI infrastructure (skills, agents, hooks, pre-commit) |
+| default | opus 5.5 | All standard tools | markdown | /tmp/cage | General purpose |
+| fast | opus 5.5 | Basic tools | json | /tmp/cage | Lightweight toolset |
+| web | opus 5.5 | Read, Glob, Grep, WebSearch, WebFetch | markdown | /tmp/cage | Online research |
+| full | opus 5.5 | All tools + TodoWrite | json | /tmp | All tools, complex multi-step tasks |
+| self | opus 5.5 | Standard tools + git branch | markdown | cage repo | Modify cage itself |
+| settings | opus 5.5 | Standard tools + Write, Edit, nvim, lua | markdown | ~/MEGA/config | Update host configs (Claude Code, WezTerm, Neovim, dotfiles) |
+| latex | opus 5.5 | LaTeX toolchain + Write, Edit, git | markdown | ~/MEGA/repo/latex | bp-latex/bp-library LaTeX infrastructure |
+| ai | opus 5.5 | Read/Write/Edit/Grep + git + jq | markdown | ~/MEGA/config/dotfiles/ai | Claude Code / AI infrastructure (skills, agents, hooks, pre-commit) |
+
+Every profile currently pins `claude-opus-5-5[1m]` at effort `high`.
 
 CWD `.` means the caller's working directory. `/tmp/cage` is an isolated directory.
 

@@ -1,7 +1,7 @@
 {
   "description": "Claude Code / AI infrastructure: dotfiles/ai (agents, skills, hooks, scripts, settings), the pre-commit pipeline, shell/ai, repo/claude tools, mindcet/macroverse integration",
-  "model": "opus[1m]",
-  "effort": "max",
+  "model": "claude-opus-5-5[1m]",
+  "effort": "high",
   "tools": "Read,Glob,Grep,Write,Edit,WebSearch,WebFetch,TodoWrite,Bash(ls:*),Bash(find:*),Bash(du:*),Bash(df:*),Bash(which:*),Bash(type:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(file:*),Bash(jq:*),Bash(od:*),Bash(strings:*),Bash(md5sum:*),Bash(sha1sum:*),Bash(sha256sum:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git add:*),Bash(git branch:*),Bash(grep:*),Bash(diff:*),Bash(stat:*),Bash(wc:*),Bash(sort:*),Bash(cut:*),Bash(tr:*),Bash(echo:*),Bash(awk:*),Bash(tac:*),Bash(nl:*),Bash(rev:*)",
   "output": "markdown",
   "cwd": "/home/bpeeters/MEGA/config/dotfiles/ai",
