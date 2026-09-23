@@ -5,7 +5,7 @@ Claude session management for interactive and background workflows.
 ## Installation
 
 ```bash
-cd ~/MEGA/repo/claude/cage
+cd ~/MEGA/repo/claude/tools/cage
 ./install.sh
 ```
 
