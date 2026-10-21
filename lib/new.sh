@@ -1,55 +1,57 @@
 #!/usr/bin/env bash
 
 # new.sh - Start a new Claude session
-# Usage: cage new [options] [profile] "task"
+# Usage: cage new [options] [profile] ["task"]
 
 _cage_new_help() {
-    # Dynamic help: list profiles from files
     cat <<'EOF'
 cage new - Start a new Claude session
 
-Usage: cage new [options] [profile] "task"
+Usage: cage new [options] [profile] ["task"]
 
-By default, starts an interactive foreground session.
-With -p, runs non-interactively in the background.
-
-When an interactive session ends, your shell cd's into the session's working
-directory (via the cage() shell wrapper; deliberately not standard Unix
-child-process behavior — 'command cage' bypasses it).
+  profile  a name from the list below (default: default)
+  task     sent as the session's first prompt; omit it to open an empty
+           interactive session (required with -p). Quote it: unquoted,
+           a first word naming a profile or a word starting with - is
+           taken by cage, and zsh expands ? and *
 
 Options:
-  -p, --print          Non-interactive background mode (like claude -p)
-  -m, --model MODEL    Model override (opus[1m], sonnet, haiku)
-  -t, --tail           Tail the log after starting (only with -p)
-  --md                 Force markdown output (only with -p)
-  --json               Force JSON output (only with -p)
-  --result-file PATH   Custom path for result JSON (only with -p)
-  --plugin-dir PATH    Load a plugin dir or .zip for this session (repeatable;
-                       stored in the session meta, re-applied by cage resume)
+  -p, --print          Run in the background (like claude -p)
+  -m, --model MODEL    Model override, e.g. claude-sonnet-5-5
+  -t, --tail           Tail the log after starting (with -p)
+  --md | --json        Force the output format (with -p)
+  --result-file PATH   Custom result path (with -p)
+  --plugin-dir PATH    Load a plugin dir or .zip (repeatable; re-applied by
+                       cage resume)
   -h, --help           Show this help
 
+An interactive session ends with your shell cd'd into its working directory
+(cage() shell wrapper; 'command cage' opts out).
+
+Profiles:
 EOF
-    echo "Profiles (positional, before the task):"
+    # Dynamic: one row per profile file; the tool list is only counted here
     source "$CAGE_ROOT/lib/profile.sh"
+    local fmt="  %-10s %-21s %-6s %-5s %5s  %s\n"
+    printf "$fmt" NAME MODEL EFFORT OUT TOOLS CWD
+    local f name tools_arr out
     for f in "$CAGE_PROFILES_DIR"/*.json; do
         [ -f "$f" ] || continue
-        local name=$(basename "$f" .json)
+        name=$(basename "$f" .json)
         _cage_profile_summary_fields "$f"
-        printf "  %-10s %s [%s, %s, %s]\n" "$name" "$PSUM_DESC" "$PSUM_MODEL" "$PSUM_EFFORT" "$PSUM_OUTPUT"
-        printf "             %s\n" "$PSUM_TOOLS"
+        IFS=',' read -ra tools_arr <<< "$PSUM_TOOLS"
+        out="$PSUM_OUTPUT"
+        [ "$out" = "markdown" ] && out="md"
+        printf "$fmt" "$name" "$PSUM_MODEL" "$PSUM_EFFORT" "$out" "${#tools_arr[@]}" "${PSUM_CWD/#$HOME/\~}"
     done
     cat <<'EOF'
-
-Model can be overridden with -m: cage new -m 'opus[1m]' fast "task"
-See 'cage profile' for full profile management.
+  'cage profile list' describes them; 'cage profile show NAME' lists the tools.
 
 Examples:
   cage new "Fix the bug in auth.py"
-  cage new fast "Quick question about this code"
-  cage new -p web "What are best practices for X?"
-  cage new -m 'opus[1m]' "Complex refactoring task"
-  cage new --plugin-dir ./my-plugin "Try the plugin"
-  cage new -pt "Explain this codebase"
+  cage new fast "Quick question"
+  cage new -p web "Best practices for X?"
+  cage new --plugin-dir ./my-plugin "Try it"
 EOF
 }
 
@@ -114,6 +116,11 @@ cage_new() {
     fi
 
     local task="$*"
+    # claude -p with an empty prompt dies in the background wrapper, unseen
+    if [ "$print_mode" = true ] && [ -z "$task" ]; then
+        echo -e "${RED}Error:${NC} -p requires a task" >&2
+        return 1
+    fi
     cage_load_profile "$profile" || return 1
 
     local tools="$PROF_TOOLS"
@@ -194,11 +201,15 @@ cage_new() {
         # is additive (keeps Claude's defaults + CLAUDE.md) and applies for the whole session.
         local sysprompt_args=()
         [ -n "$sys_prompt" ] && sysprompt_args=(--append-system-prompt "$sys_prompt")
+        # --allowedTools is variadic (<tools...>): without the `--` it swallows
+        # the task as one more tool name and the session opens with no prompt
+        local task_args=()
+        [ -n "$task" ] && task_args=(-- "$task")
         cage_write_cwd_handoff "$work_dir"
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}" ${task:+"$task"})
+        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}" "${task_args[@]}")
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$pid_file"

@@ -264,18 +264,20 @@ cage_load_profile() {
 }
 
 # Read profile summary fields (for the 'cage new --help' and 'cage profile list'
-# listings) in one jq call. Sets: PSUM_DESC, PSUM_MODEL, PSUM_OUTPUT, PSUM_EFFORT, PSUM_TOOLS
+# listings) in one jq call. Sets: PSUM_DESC, PSUM_MODEL, PSUM_OUTPUT, PSUM_EFFORT,
+# PSUM_TOOLS, PSUM_CWD
 # Usage: _cage_profile_summary_fields "$profile_file"
 _cage_profile_summary_fields() {
     # Reset first: if the profile JSON fails to parse, jq emits nothing and eval is
     # a no-op, so without this the previous profile's values would leak into the row.
-    PSUM_DESC="" PSUM_MODEL="" PSUM_OUTPUT="" PSUM_EFFORT="" PSUM_TOOLS=""
+    PSUM_DESC="" PSUM_MODEL="" PSUM_OUTPUT="" PSUM_EFFORT="" PSUM_TOOLS="" PSUM_CWD=""
     eval "$(jq -r '
         "PSUM_DESC=" + (.description // "" | @sh) + " " +
         "PSUM_MODEL=" + (.model // "" | @sh) + " " +
         "PSUM_OUTPUT=" + (.output // "" | @sh) + " " +
         "PSUM_EFFORT=" + (.effort // "xhigh" | @sh) + " " +
-        "PSUM_TOOLS=" + (.tools // "" | @sh)
+        "PSUM_TOOLS=" + (.tools // "" | @sh) + " " +
+        "PSUM_CWD=" + (.cwd // "." | @sh)
     ' "$1")"
 }
 
