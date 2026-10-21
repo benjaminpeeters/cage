@@ -24,6 +24,7 @@ Metadata Fields:
   start_time  ISO timestamp
   model       Model used
   tools       Allowed tools
+  plugin_dirs --plugin-dir paths (only when given)
 
 Examples:
   cage meta s0-1           # Full metadata

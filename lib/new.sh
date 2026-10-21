@@ -24,6 +24,8 @@ Options:
   --md                 Force markdown output (only with -p)
   --json               Force JSON output (only with -p)
   --result-file PATH   Custom path for result JSON (only with -p)
+  --plugin-dir PATH    Load a plugin dir or .zip for this session (repeatable;
+                       stored in the session meta, re-applied by cage resume)
   -h, --help           Show this help
 
 EOF
@@ -46,6 +48,7 @@ Examples:
   cage new fast "Quick question about this code"
   cage new -p web "What are best practices for X?"
   cage new -m 'opus[1m]' "Complex refactoring task"
+  cage new --plugin-dir ./my-plugin "Try the plugin"
   cage new -pt "Explain this codebase"
 EOF
 }
@@ -56,11 +59,12 @@ cage_new() {
     local output_override=""
     local model_override=""
     local result_file=""
+    local plugin_dirs=()
 
     # Parse options with GNU getopt
     local opts
     opts=$(getopt -o ptm:h \
-                  --long print,tail,model:,md,json,result-file:,help \
+                  --long print,tail,model:,md,json,result-file:,plugin-dir:,help \
                   -n 'cage new' -- "$@") || return 1
     eval set -- "$opts"
 
@@ -72,6 +76,17 @@ cage_new() {
             --md) output_override="markdown"; shift ;;
             --json) output_override="json"; shift ;;
             --result-file) result_file="$2"; shift 2 ;;
+            --plugin-dir)
+                # Absolute now: claude runs from the profile cwd, where a
+                # caller-relative path would not resolve
+                local abs_plugin
+                abs_plugin=$(realpath -e -- "$2") || {
+                    echo -e "${RED}Error:${NC} --plugin-dir path cannot be resolved: $2" >&2
+                    return 1
+                }
+                plugin_dirs+=("$abs_plugin")
+                shift 2
+                ;;
             -h|--help) _cage_new_help; return 0 ;;
             --) shift; break ;;
             *) echo "Internal error"; return 1 ;;
@@ -144,7 +159,8 @@ cage_new() {
         cage_write_sandbox_settings "$settings_file" "$PROF_SANDBOX"
     fi
 
-    # Store metadata as JSON before running (sandbox key omitted when absent)
+    # Store metadata as JSON before running (sandbox and plugin_dirs keys
+    # omitted when absent)
     jq -n \
         --arg uuid "$uuid" \
         --arg name "$session_name" \
@@ -159,8 +175,14 @@ cage_new() {
         --arg system_prompt "$sys_prompt" \
         --argjson sandbox "${PROF_SANDBOX:-null}" \
         '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, output: $output, cwd: $cwd, system_prompt: $system_prompt}
-         + (if $sandbox != null then {sandbox: $sandbox} else {} end)' \
+         + (if $sandbox != null then {sandbox: $sandbox} else {} end)
+         + (if ($ARGS.positional | length) > 0 then {plugin_dirs: $ARGS.positional} else {} end)' \
+        --args "${plugin_dirs[@]}" \
         > "$meta_file"
+
+    # Empty array → zero args, so a plugin-less session launches byte-identically
+    local plugin_args=() d
+    for d in "${plugin_dirs[@]}"; do plugin_args+=(--plugin-dir "$d"); done
 
     # Mode 1: Interactive (default)
     if [ "$print_mode" = false ]; then
@@ -176,7 +198,7 @@ cage_new() {
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" ${task:+"$task"})
+        (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}" ${task:+"$task"})
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$pid_file"
@@ -242,6 +264,9 @@ WORK_DIR="${12}"
 EFFORT="${13}"
 SETTINGS_FILE="${14}"
 SYS_PROMPT="${15}"
+# Remaining args: ready-built --plugin-dir flag pairs (none for a plugin-less session)
+shift 15
+PLUGIN_ARGS=("$@")
 
 # Per-session sandbox settings. Empty when the profile declares no sandbox block,
 # so the claude command below is byte-identical to a non-sandbox launch.
@@ -279,6 +304,7 @@ if [ "$MD_MODE" = "true" ]; then
         --allowedTools "$TOOLS" \
         "${SETTINGS_ARGS[@]}" \
         "${APPEND_ARGS[@]}" \
+        "${PLUGIN_ARGS[@]}" \
         --output-format text >> "$LOG_FILE" 2>&1
     EXIT_CODE=$?
     # For markdown mode, copy log content to result (minus header)
@@ -292,6 +318,7 @@ else
         --allowedTools "$TOOLS" \
         "${SETTINGS_ARGS[@]}" \
         "${APPEND_ARGS[@]}" \
+        "${PLUGIN_ARGS[@]}" \
         $OUTPUT_FLAGS 2>&1)
     EXIT_CODE=$?
     echo "$OUTPUT" >> "$LOG_FILE"
@@ -329,6 +356,7 @@ WRAPPER_EOF
         "$effort" \
         "$settings_file" \
         "$sys_prompt" \
+        "${plugin_args[@]}" \
         < /dev/null > /dev/null 2>&1 &
 
     local pid=$!

@@ -149,6 +149,7 @@ cage_resume() {
         local meta_file="$_cage_meta_file"
         local session_name="$_cage_name" profile="$_cage_profile" orig_cwd="$_cage_cwd"
         local orig_model="$_cage_model" orig_effort="$_cage_effort" orig_tools="$_cage_tools" orig_sys_prompt="$_cage_sys_prompt"
+        local orig_plugin_dirs=("${_cage_plugin_dirs[@]}")
         # Canonicalize to the absolute handle: relative codes shift at midnight,
         # and the pid/status paths below are re-derived from $session after
         # claude exits — possibly on a later day.
@@ -176,12 +177,16 @@ cage_resume() {
         local sysprompt_args=()
         [ -n "$orig_sys_prompt" ] && sysprompt_args=(--append-system-prompt "$orig_sys_prompt")
 
+        # Re-apply the session's --plugin-dir flags (per-invocation, like the prompt above)
+        local plugin_args=() d
+        for d in "${orig_plugin_dirs[@]}"; do plugin_args+=(--plugin-dir "$d"); done
+
         local resume_pid_file=$(cage_get_session_file "$session" "pid")
         cage_write_cwd_handoff "$orig_cwd"
         cage_interactive_start "$resume_pid_file"
         trap 'cage_interactive_end "$resume_pid_file"' EXIT
         trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
-        (cd "$orig_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} ${orig_tools:+--allowedTools "$orig_tools"} "${settings_args[@]}" "${sysprompt_args[@]}")
+        (cd "$orig_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} ${orig_tools:+--allowedTools "$orig_tools"} "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}")
         local _exit_code=$?
         trap - EXIT INT TERM
         cage_interactive_end "$resume_pid_file"
@@ -210,6 +215,7 @@ cage_resume() {
     local meta_file="$_cage_meta_file"
     local orig_name="$_cage_name" orig_cwd="$_cage_cwd" orig_profile="$_cage_profile"
     local orig_tools="$_cage_tools" orig_model="$_cage_model" orig_effort="$_cage_effort" orig_sys_prompt="$_cage_sys_prompt"
+    local orig_plugin_dirs=("${_cage_plugin_dirs[@]}")
     # Canonical absolute handle (date-stable for all path lookups below); the
     # wrapper later cd's into the ensured cwd before claude --resume
     session="$orig_name"
@@ -268,6 +274,10 @@ cage_resume() {
         append_flag="--append-system-prompt \"\$(cat '$sysprompt_file')\""
     fi
 
+    # Re-apply the session's --plugin-dir flags (passed to the wrapper as args)
+    local plugin_args=() d
+    for d in "${orig_plugin_dirs[@]}"; do plugin_args+=(--plugin-dir "$d"); done
+
     # Build output flags
     local output_flags
     if [ "$md_mode" = true ]; then
@@ -294,7 +304,9 @@ cage_resume() {
             --arg system_prompt "$orig_sys_prompt" \
             --argjson sandbox "${orig_sandbox:-null}" \
             '{uuid: $uuid, name: $name, profile: $profile, task: $task, start_time: $start_time, model: $model, effort: $effort, tools: $tools, cwd: $cwd, parent_session: $parent_session, parent_uuid: $parent_uuid, system_prompt: $system_prompt}
-             + (if $sandbox != null then {sandbox: $sandbox} else {} end)' \
+             + (if $sandbox != null then {sandbox: $sandbox} else {} end)
+             + (if ($ARGS.positional | length) > 0 then {plugin_dirs: $ARGS.positional} else {} end)' \
+            --args "${orig_plugin_dirs[@]}" \
             > "$new_meta_file"
     fi
 
@@ -333,9 +345,12 @@ cage_resume() {
     local wrapper_script="/tmp/cage_wrapper_${job_session}.sh"
     cat > "$wrapper_script" << WRAPPER_EOF
 #!/bin/bash
-# The task arrives as \$1: interpolating it into this unquoted heredoc would
-# re-parse quotes and \\\$(...) from the prompt text as shell syntax.
+# The task arrives as \$1 and the --plugin-dir pairs after it: interpolating
+# them into this unquoted heredoc would re-parse quotes and \\\$(...) as shell
+# syntax.
 TASK="\$1"
+shift
+PLUGIN_ARGS=("\$@")
 LOG_FILE="$log_file"
 RESULT_FILE="$result_file"
 STATUS_FILE="$status_file"
@@ -380,6 +395,7 @@ OUTPUT=\$(claude -p "\$TASK" \\
     --allowedTools "$orig_tools" \\
     $settings_flag \\
     $append_flag \\
+    "\${PLUGIN_ARGS[@]}" \\
     \$OUTPUT_FLAGS 2>&1)
 EXIT_CODE=\$?
 
@@ -406,9 +422,9 @@ WRAPPER_EOF
 
     chmod +x "$wrapper_script"
 
-    # Run in background — the prompt travels as an argument, never as
-    # interpolated script text
-    nohup "$wrapper_script" "$prompt" < /dev/null > /dev/null 2>&1 &
+    # Run in background — the prompt and plugin dirs travel as arguments,
+    # never as interpolated script text
+    nohup "$wrapper_script" "$prompt" "${plugin_args[@]}" < /dev/null > /dev/null 2>&1 &
 
     local pid=$!
     echo $pid > "$pid_file"

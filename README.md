@@ -20,7 +20,13 @@ cage new -m opus "Complex task"                   # Override model
 cage new -p "Background task"                     # Background mode
 cage new -p web "What are best practices for X?"  # Background with profile
 cage new -pt "Fix something"                      # Background with tail
+cage new --plugin-dir ./my-plugin "Try it"        # Load a plugin dir/.zip (repeatable)
 ```
+
+`--plugin-dir` is passed through to `claude` (session-only plugin loading).
+cage stores the absolute paths in the session meta and re-passes them on every
+`cage resume` (forks inherit them); a resume refuses loudly if a stored plugin
+path no longer exists.
 
 ### Resume a session
 

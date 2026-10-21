@@ -473,13 +473,15 @@ cage_require_transcript() {
 # recreation, transcript existence). Sets globals: _cage_meta_file, _cage_name
 # (the canonical absolute handle — callers should replace their user-typed
 # reference with it, since relative codes shift at midnight), _cage_profile,
-# _cage_cwd, _cage_model, _cage_effort, _cage_tools, _cage_sys_prompt.
+# _cage_cwd, _cage_model, _cage_effort, _cage_tools, _cage_sys_prompt, and the
+# array _cage_plugin_dirs (each checked to still exist).
 # Usage: cage_load_resume_meta "$session" "$uuid" || return 1
 cage_load_resume_meta() {
     local session="$1" uuid="$2"
     _cage_meta_file=$(cage_get_session_file "$session" "meta.json")
     _cage_name="" _cage_profile="" _cage_cwd="" _cage_model=""
     _cage_effort="" _cage_tools="" _cage_sys_prompt=""
+    _cage_plugin_dirs=()
     if [ ! -f "$_cage_meta_file" ]; then
         echo -e "${RED}Error:${NC} metadata file missing for session $session — cannot resume" >&2
         return 1
@@ -491,12 +493,23 @@ cage_load_resume_meta() {
         "_cage_model=" + (.model // "sonnet" | @sh) + " " +
         "_cage_effort=" + (.effort // "xhigh" | @sh) + " " +
         "_cage_tools=" + (.tools // "" | @sh) + " " +
-        "_cage_sys_prompt=" + (.system_prompt // "" | @sh)
+        "_cage_sys_prompt=" + (.system_prompt // "" | @sh) + " " +
+        "_cage_plugin_dirs=(" + (.plugin_dirs // [] | @sh) + ")"
     ' "$_cage_meta_file" 2>/dev/null)"
     if [ -z "$_cage_name" ] || [ -z "$_cage_cwd" ]; then
         echo -e "${RED}Error:${NC} metadata for session $session lacks name or cwd: $_cage_meta_file" >&2
         return 1
     fi
+    # --plugin-dir is per-invocation, so a resume re-passes the stored dirs;
+    # resuming without a plugin the session was started with would silently
+    # change its behavior
+    local d
+    for d in "${_cage_plugin_dirs[@]}"; do
+        [ -e "$d" ] || {
+            echo -e "${RED}Error:${NC} plugin dir of session $session no longer exists: $d" >&2
+            return 1
+        }
+    done
     cage_refuse_if_running "$_cage_name" || return 1
     cage_ensure_cwd "$_cage_cwd" || return 1
     cage_require_transcript "$_cage_name" "$_cage_cwd" "$uuid" || return 1
