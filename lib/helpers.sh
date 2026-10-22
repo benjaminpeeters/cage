@@ -48,7 +48,7 @@ cage_get_session_file() {
         # Epoch subtraction at UTC midnight, not `date -d "X - N days"`:
         # calendar phrasing misreads negative offsets ("- -1 days" still goes
         # backwards) and local midnights drift across DST changes
-        local today_epoch=$(date -ud "$(date +%Y-%m-%d)" +%s)
+        local today_epoch=$(cage_today_epoch)
         target_date=$(date -ud "@$(( today_epoch - days_ago * 86400 ))" +%Y-%m-%d)
     # Parse cage-YYYY-MM-DD-N absolute format (e.g., cage-2026-01-05-1)
     elif [[ $session =~ ^cage[-_]([0-9]{4}-[0-9]{2}-[0-9]{2})[-_]([0-9]+)$ ]]; then
@@ -156,20 +156,45 @@ cage_meta_rows() {
     }
 }
 
-# Whole days from <date> to today (UTC midnights, so DST-safe; negative when
-# <date> is ahead of the local date, e.g. after a westward timezone change)
-# Usage: cage_days_ago 2026-01-03 -> 2 (when today is 2026-01-05)
-cage_days_ago() {
-    echo $(( ($(date -ud "$(date +%Y-%m-%d)" +%s) - $(date -ud "$1" +%s)) / 86400 ))
+# Epoch of today's local date taken as a UTC midnight: the base of all day
+# arithmetic (UTC midnights are exactly 86400 s apart, so it is DST-safe)
+cage_today_epoch() {
+    date -ud "$(date +%Y-%m-%d)" +%s
 }
 
-# Relative display code for a dated dir entry. Display-only: it rots at
-# midnight, so printed resume hints must use the absolute cage-YYYY-MM-DD-N
-# handle instead.
+# Whole days between two such epochs, into the named variable (no subshell).
+# Negative when the day is ahead of the local date (westward timezone change).
+# Usage: cage_days_ago_var out_var today_epoch day_epoch
+cage_days_ago_var() {
+    local -n _cda_out="$1"
+    _cda_out=$(( ($2 - $3) / 86400 ))
+}
+
+# Whole days from <date> to today
+# Usage: cage_days_ago 2026-01-03 -> 2 (when today is 2026-01-05)
+cage_days_ago() {
+    local _cda_days
+    cage_days_ago_var _cda_days "$(cage_today_epoch)" "$(date -ud "$1" +%s)"
+    echo "$_cda_days"
+}
+
+# Relative display code from precomputed epochs, into the named variable (no
+# subshell, for per-row loops). Display-only: it rots at midnight, so printed
+# resume hints must use the absolute cage-YYYY-MM-DD-N handle instead.
+# Usage: cage_relative_code_var out_var today_epoch day_epoch session_num
+cage_relative_code_var() {
+    local -n _crc_out="$1"
+    local _crc_days
+    cage_days_ago_var _crc_days "$2" "$3"
+    _crc_out="s${_crc_days}-$4"
+}
+
+# Relative display code for a dated dir entry
 # Usage: cage_relative_code 2026-01-05 3 -> s0-3 (when today is 2026-01-05)
 cage_relative_code() {
-    local day_raw="$1" session_num="$2"
-    echo "s$(cage_days_ago "$day_raw")-${session_num}"
+    local _crc_code
+    cage_relative_code_var _crc_code "$(cage_today_epoch)" "$(date -ud "$1" +%s)" "$2"
+    echo "$_crc_code"
 }
 
 # Get next available session number in a dated dir. The dir is an argument so
@@ -227,25 +252,33 @@ cage_print_resume_hint() {
     echo -e "${CYAN}Resume with:${NC} cage resume ${session_id}"
 }
 
-# Path to Claude's transcript for a session. Claude Code's project slug maps
-# '/', '.' AND '_' to '-' (verified against real ~/.claude/projects dirs) —
-# converting only '/' silently misses any cwd containing a dot or underscore.
+# Path to Claude's transcript for a session. Claude Code's project slug turns
+# every non-alphanumeric character into '-' (no ~/.claude/projects dir name
+# holds anything but [A-Za-z0-9-]); mapping only '/', '.' and '_' would miss
+# any cwd with a space, '+', '@' or a non-ASCII character.
 # Usage: cage_transcript_path cwd uuid
 cage_transcript_path() {
-    local cwd="$1" uuid="$2"
-    local slug="${cwd//\//-}"
-    slug="${slug//./-}"
-    slug="${slug//_/-}"
-    echo "${HOME}/.claude/projects/${slug}/${uuid}.jsonl"
+    local _ctp_path
+    cage_transcript_path_var _ctp_path "$1" "$2"
+    echo "$_ctp_path"
+}
+
+# Same, written into the named variable: no subshell, for per-row loops
+# Usage: cage_transcript_path_var out_var cwd uuid
+cage_transcript_path_var() {
+    local -n _ctp_out="$1"
+    _ctp_out="${HOME}/.claude/projects/${2//[^a-zA-Z0-9]/-}/${3}.jsonl"
 }
 
 # Check if Claude stored a conversation for a session
 # Returns 0 if conversation file exists, 1 otherwise
+# (no subshell, so per-row loops can call it)
 # Usage: cage_has_conversation cwd uuid
 cage_has_conversation() {
-    local cwd="$1" uuid="$2"
-    [ -n "$cwd" ] && [ -n "$uuid" ] || return 1
-    [ -f "$(cage_transcript_path "$cwd" "$uuid")" ]
+    [ -n "$1" ] && [ -n "$2" ] || return 1
+    local _chc_path
+    cage_transcript_path_var _chc_path "$1" "$2"
+    [ -f "$_chc_path" ]
 }
 
 # Current display name of a session: the LAST custom-title record in the
@@ -270,13 +303,16 @@ cage_display_name() {
 }
 
 # jq program emitting each real user prompt from a transcript, one per line
-# (isMeta records, command noise, and tool_result-only messages are skipped;
-# newlines collapsed). Shared by cage_session_context / cage_real_prompt_count.
+# (isMeta records, command noise, tool_result-only messages and
+# [Request interrupted…] markers are skipped; newlines collapsed). Shared by
+# cage_session_context / cage_real_prompt_count; the resume picker's cache key
+# hashes it, so editing it invalidates that cache by itself.
 _CAGE_PROMPT_JQ='fromjson?
     | select(.type=="user" and (.isMeta != true))
     | .message.content
     | if type=="array" then (map(select(.type=="text") | .text) | join(" ")) else . end
     | select(type=="string") | select(length>0) | select(startswith("<")|not)
+    | select(startswith("[Request interrupted")|not)
     | gsub("[\\n\\t]+"; " ")'
 
 # One-line "what was this session about" snippet: the first real user prompt.
@@ -334,12 +370,78 @@ cage_is_near_empty() {
 }
 
 # Remove every registry file of one session row; prunes the dated dir once it
-# empties. The Claude-side transcript is never touched.
+# empties. The Claude-side transcript is never touched. Returns non-zero when
+# a file could not be removed (rm prints the cause); the dated-dir prune is
+# best-effort, since a non-empty dir is the normal case.
 # Usage: cage_remove_session_files "$meta_file"
 cage_remove_session_files() {
     local base="${1%.meta.json}"
-    rm -f "$base".{meta.json,log,pid,status,result.json,result.md,settings.json,sysprompt}
+    rm -f "$base".{meta.json,log,pid,status,result.json,result.md,settings.json,sysprompt} || return 1
     rmdir --ignore-fail-on-non-empty "$(dirname "$1")" 2>/dev/null
+    return 0
+}
+
+# Offer to delete a near-empty session right after it closed (interactive
+# exits of cage new and cage resume; Enter = clean), so test debris never
+# accumulates. Returns 0 when the row was removed, 1 when it was kept or is
+# not near-empty, 2 when the removal failed (error printed).
+# Usage: cage_offer_near_empty_cleanup cwd uuid meta_file session_name
+cage_offer_near_empty_cleanup() {
+    local cwd="$1" uuid="$2" meta_file="$3" session_name="$4"
+    [ -t 0 ] && cage_is_near_empty "$cwd" "$uuid" "$meta_file" || return 1
+    gum confirm --affirmative "Clean" --negative "Keep" "Near-empty session (single short prompt) — clean it now?" || return 1
+    cage_remove_session_files "$meta_file" || {
+        echo -e "${RED}Error:${NC} cannot remove near-empty session $session_name (rm error above)" >&2
+        return 2
+    }
+    echo -e "${DIM}Near-empty session removed.${NC}"
+}
+
+# True when a registry row's pid file points at a live process
+# Usage: cage_meta_running "$meta_file"
+cage_meta_running() {
+    local pid_file="${1%.meta.json}.pid" pid=""
+    [ -f "$pid_file" ] || return 1
+    read -r pid < "$pid_file"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# Delete registry rows that can never be resumed: no transcript (Claude Code
+# purged it after cleanupPeriodDays, or claude was never reached). Rows with a
+# background log or result are kept (cage result/tail/check still read them);
+# RUNNING rows and today's rows (a launch may not have written its transcript
+# yet) are never touched. These exemptions apply only to this automatic,
+# unconfirmed prune: the confirmed `cage clean --expired` deliberately also
+# removes today's and log/result rows. A row whose project dir does not exist
+# at all is also spared: that points at a slug cage computed wrongly rather
+# than a purged transcript, and an unconfirmed delete must not rest on it.
+# Prints one notice when anything was removed.
+# Usage: cage_prune_unresumable || return 1
+cage_prune_unresumable() {
+    local rows
+    rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 1
+    [ -n "$rows" ] || return 0
+    local today pruned=0 mf uuid cwd day_dir base transcript
+    today=$(date +%Y-%m-%d)
+    while IFS=$'\t' read -r mf uuid cwd; do
+        cage_transcript_path_var transcript "$cwd" "$uuid"
+        [ -f "$transcript" ] && continue
+        [ -d "${transcript%/*}" ] || continue
+        day_dir="${mf%/*}"
+        [ "${day_dir##*/}" = "$today" ] && continue
+        cage_meta_running "$mf" && continue
+        base="${mf%.meta.json}"
+        { [ -f "$base.log" ] || [ -f "$base.result.json" ] || [ -f "$base.result.md" ]; } && continue
+        cage_remove_session_files "$mf" || {
+            echo -e "${RED}Error:${NC} cannot prune $(cage_handle_from_meta "$mf") (rm error above); ${pruned} record(s) were removed before it" >&2
+            return 1
+        }
+        pruned=$((pruned + 1))
+    done <<< "$rows"
+    if [ "$pruned" -gt 0 ]; then
+        echo -e "${DIM}Pruned ${pruned} unresumable session record(s): no transcript left (background logs/results are kept)${NC}" >&2
+    fi
+    return 0
 }
 
 # Claude Code's transcript retention in days (cleanupPeriodDays; 30 is the
@@ -412,16 +514,7 @@ cage_write_cwd_handoff() {
 # Check if a session is currently running
 # Usage: cage_is_running "s0-1" -> 0 (running) or 1 (not running)
 cage_is_running() {
-    local session="$1"
-    local pid_file=$(cage_get_session_file "$session" "pid")
-
-    if [ -f "$pid_file" ]; then
-        local pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    return 1
+    cage_meta_running "$(cage_get_session_file "$1" "meta.json")"
 }
 
 # Get session PID if running
@@ -458,8 +551,12 @@ cage_ensure_cwd() {
 }
 
 # A registry row without a transcript cannot be resumed (the transcript aged
-# past Claude Code's retention, or claude was never reached). Fail loudly and
-# KEEP the row — deleting it would destroy the only remaining record.
+# past Claude Code's retention, or claude was never reached). Resuming one
+# fails loudly and leaves the row alone: removing rows is the job of
+# cage_prune_unresumable (listing paths) and cage clean, not of a resume.
+# The picker never offers a transcript-less row and RUNNING rows are refused
+# earlier by cage_refuse_if_running, so this fires only when a resume names
+# such a row directly (e.g. one the prune spared or has not reached yet).
 # Usage: cage_require_transcript "$session" "$orig_cwd" "$uuid" || return 1
 cage_require_transcript() {
     local session="$1" cwd="$2" uuid="$3"

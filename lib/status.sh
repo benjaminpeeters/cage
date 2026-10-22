@@ -137,6 +137,11 @@ Options:
 
 Rows show identifying context: the /rename'd name when set, else the
 session's task or the first prompt typed into it.
+
+The listing first prunes rows that can never be resumed (no transcript
+left); today's, RUNNING and background log/result rows are kept. A failed
+prune is reported and makes the command exit non-zero, but the sessions
+are still listed.
 EOF
                 return 0
                 ;;
@@ -211,6 +216,12 @@ _cage_status_list() {
     local profile_filter="$2"
     local show_all="${3:-false}"
     local hidden=0
+
+    # The listing does not depend on the prune: a failed prune (e.g. a
+    # read-only registry inside a sandbox) keeps its error on stderr and the
+    # non-zero exit, but the sessions are still listed
+    local prune_rc=0
+    cage_prune_unresumable || prune_rc=1
 
     # Scan all meta.json files sorted by modification time (newest first)
     local meta_files=()
@@ -310,4 +321,5 @@ _cage_status_list() {
     if [ "$hidden" -gt 0 ]; then
         echo -e "${DIM}(${hidden} near-empty session(s) hidden — cage status --all)${NC}"
     fi
+    return $prune_rc
 }

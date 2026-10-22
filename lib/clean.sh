@@ -42,15 +42,6 @@ _cage_clean_describe() {
     echo -e "  ${GREEN}$(cage_handle_from_meta "$mf")${NC}  ${DIM}${ctx:0:60}${NC}"
 }
 
-# True when the session row's pid file points at a live process
-_cage_clean_is_running() {
-    local pid_file="${1%.meta.json}.pid"
-    [ -f "$pid_file" ] || return 1
-    local pid
-    read -r pid < "$pid_file"
-    kill -0 "$pid" 2>/dev/null
-}
-
 cage_clean() {
     local mode="" days="" dry_run=false
     while [ $# -gt 0 ]; do
@@ -129,7 +120,7 @@ cage_clean() {
     local mf uuid cwd task
     while IFS=$'\t' read -r mf uuid cwd task; do
         [ -n "$mf" ] || continue
-        if _cage_clean_is_running "$mf"; then
+        if cage_meta_running "$mf"; then
             kept_running=$((kept_running + 1))
             continue
         fi
@@ -208,22 +199,27 @@ cage_clean() {
         return 1
     }
 
+    local failed=0
     for mf in "${targets[@]}"; do
-        cage_remove_session_files "$mf"
+        cage_remove_session_files "$mf" || failed=$((failed + 1))
     done
-    echo -e "${GREEN}✓${NC} Removed ${#targets[@]} session record(s)."
+    echo -e "${GREEN}✓${NC} Removed $(( ${#targets[@]} - failed )) session record(s)."
 
     # Sweep stale pid files left in the remaining rows (their processes died
-    # without cleanup; a recycled PID could otherwise show a false RUNNING)
-    local swept=0 pid_file pid
+    # without cleanup; a recycled PID could otherwise show a false RUNNING).
+    # Runs before a removal failure is reported, so the help's promise holds.
+    local swept=0 pid_file
     for pid_file in "${CAGE_STORAGE}"/????-??-??/*.pid; do
         [ -f "$pid_file" ] || continue
-        read -r pid < "$pid_file"
-        if ! kill -0 "$pid" 2>/dev/null; then
-            rm -f "$pid_file"
-            swept=$((swept + 1))
+        if ! cage_meta_running "${pid_file%.pid}.meta.json"; then
+            rm -f "$pid_file" && swept=$((swept + 1))
         fi
     done
     [ "$swept" -gt 0 ] && echo -e "${GREEN}✓${NC} Swept ${swept} stale pid file(s)."
+
+    if [ "$failed" -gt 0 ]; then
+        echo -e "${RED}Error:${NC} ${failed} session record(s) could not be removed (rm errors above)" >&2
+        return 1
+    fi
     return 0
 }

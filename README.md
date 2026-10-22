@@ -64,6 +64,21 @@ cage clean --empty                            # Remove near-empty sessions (not 
 
 `cage status` rows and the resume picker show identifying context per session:
 the `/rename`'d name when set, else the task or the first prompt typed into it.
+The picker gives renamed sessions their own NAME column, lists only sessions
+that can still be resumed, and caches each transcript's title and first prompt
+(`picker-cache.<checksum>.dat` in the registry, reused while the transcript's
+mtime is unchanged), so only the first open after many new sessions is slow.
+
+`cage status` (listing) and the bare `cage resume` picker prune registry rows
+that can never be resumed
+(no transcript left, e.g. past Claude Code's `cleanupPeriodDays`) and print one
+line saying how many. Rows with a background log or result are kept so
+`cage result`/`tail`/`check` still read them; RUNNING and today's rows are
+never touched, nor are rows whose `~/.claude/projects/<slug>` dir does not
+exist at all (that points at a mis-computed slug, not a purged transcript).
+The confirmed `cage clean --expired` is deliberately broader
+and also removes today's and log/result rows (RUNNING rows are still
+skipped).
 Near-empty sessions (no task, no result, not renamed, at most one
 greeting-sized prompt) are hidden by default — a dim footer counts them and
 `--all` reveals them. Closing such a session interactively offers on-the-spot
@@ -197,7 +212,7 @@ with your retention setting instead of assuming a number of days.
 
 ## Dependencies
 
-- bash (4.0+)
+- bash (4.3+, for namerefs)
 - GNU getopt (for argument parsing)
 - jq
 - uuidgen

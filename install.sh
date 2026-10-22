@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # install.sh - Install cage CLI
+# Same interpreter lookup as bin/cage, so the version check below tests the
+# bash cage will actually run under (macOS: /bin/bash is 3.2)
 
 set -e
 
@@ -12,10 +14,10 @@ echo "Installing cage CLI..."
 # Check dependencies
 echo "Checking dependencies..."
 
-# Check for bash 4.0+
-BASH_VERSION_NUM="${BASH_VERSION%%[^0-9]*}"
-if [ "$BASH_VERSION_NUM" -lt 4 ]; then
-    echo "Warning: bash 4.0+ recommended (found $BASH_VERSION)"
+# Check for bash 4.3+ (namerefs: local -n)
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 3 ]; }; then
+    echo "Error: bash 4.3+ is required (found $BASH_VERSION)"
+    exit 1
 fi
 
 # Check for GNU getopt (returns exit code 4 when enhanced getopt is present).

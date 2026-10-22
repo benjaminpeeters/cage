@@ -218,18 +218,17 @@ cage_new() {
         # title record even when the session is closed immediately.
         if cage_session_context "$work_dir" "$uuid" >/dev/null; then
             echo "$_exit_code" > "$status_file"
-            # Near-empty sessions get offered for immediate cleanup (Enter =
-            # clean) so test debris never accumulates in the registry
-            if [ -t 0 ] && cage_is_near_empty "$work_dir" "$uuid" "$meta_file"; then
-                if gum confirm --affirmative "Clean" --negative "Keep" "Near-empty session (single short prompt) — clean it now?"; then
-                    cage_remove_session_files "$meta_file"
-                    echo -e "${DIM}Near-empty session removed.${NC}"
-                    return $_exit_code
-                fi
-            fi
+            cage_offer_near_empty_cleanup "$work_dir" "$uuid" "$meta_file" "$session_name"
+            case $? in
+                0) return $_exit_code ;;
+                2) return 1 ;;
+            esac
             cage_print_resume_hint "$session_name"
         else
-            cage_remove_session_files "$meta_file"
+            cage_remove_session_files "$meta_file" || {
+                echo -e "${RED}Error:${NC} cannot remove empty session $session_name (rm error above)" >&2
+                return 1
+            }
             echo -e "${DIM}Empty session removed.${NC}"
         fi
         return $_exit_code
