@@ -17,16 +17,87 @@ CYAN='\033[0;36m'
 # Session registry location (persistent across reboots; the sessions' working
 # dirs — e.g. the default profile's /tmp/cage — are a separate concern)
 CAGE_STORAGE="${HOME}/.local/state/cage"
+# Transcript copies of pinned ("Keep long") sessions, restored when Claude
+# Code's retention sweep has deleted the original
+CAGE_ARCHIVE="${CAGE_STORAGE}/archive"
+# User settings (tracked copy: ~/MEGA/config/dotfiles/config/cage/config.json,
+# linked by config-sync)
+CAGE_CONFIG="${HOME}/.config/cage/config.json"
+
+# Load and validate the user settings. Every key is required and no other is
+# allowed: a missing file, a missing or unknown key or an invalid value is an
+# error naming the fix. Sets
+# CFG_CLOSE_ASK (always|unless-named|never), CFG_CLOSE_DEFAULT
+# (keep|delete|auto), CFG_PIN_DAYS, CFG_SHORT_MAX_PROMPTS and
+# CFG_SHORT_PROMPT_MAX_CHARS (whole numbers >= 1).
+# Usage: cage_load_config || return 1
+cage_load_config() {
+    if [ ! -f "$CAGE_CONFIG" ]; then
+        echo -e "${RED}Error:${NC} cage settings missing: $CAGE_CONFIG (tracked copy in ~/MEGA/config/dotfiles/config/cage/; link it with 'config-sync install')" >&2
+        return 1
+    fi
+    local out
+    out=$(jq -r '
+        # Wholeness is checked on the printed literal, which is what the
+        # shell receives: digits only (jq 1.7 prints 30.0 as "30.0" and 1e2 as
+        # "1E+2", which bash arithmetic and test -gt reject)
+        def whole($k): if (.[$k]|type)=="number" and .[$k]>=1
+                          and (.[$k]|tostring|test("^[0-9]+$")) then empty
+                       else "\($k) must be a whole number >= 1 (got \(.[$k]|@json))" end;
+        if type != "object" then "ERR\tthe settings must be a JSON object (got \(type))"
+        else
+          [ (keys_unsorted[] | select(IN("close_ask","close_default","pin_days","short_max_prompts","short_prompt_max_chars")|not) | "unknown key: \(.)"),
+            (if (.close_ask|IN("always","unless-named","never")) then empty else "close_ask must be always, unless-named or never (got \(.close_ask|@json))" end),
+            (if (.close_default|IN("keep","delete","auto")) then empty else "close_default must be keep, delete or auto (got \(.close_default|@json))" end),
+            whole("pin_days"), whole("short_max_prompts"), whole("short_prompt_max_chars")
+          ] as $errs
+          | if ($errs|length)>0 then "ERR\t" + ($errs|join("\n"))
+            else "CFG_CLOSE_ASK=\(.close_ask|@sh) CFG_CLOSE_DEFAULT=\(.close_default|@sh) CFG_PIN_DAYS=\(.pin_days) CFG_SHORT_MAX_PROMPTS=\(.short_max_prompts) CFG_SHORT_PROMPT_MAX_CHARS=\(.short_prompt_max_chars)" end
+        end
+    ' "$CAGE_CONFIG") || {
+        echo -e "${RED}Error:${NC} cage settings are not valid JSON: $CAGE_CONFIG (see jq error above)" >&2
+        return 1
+    }
+    if [[ $out == ERR$'\t'* ]]; then
+        echo -e "${RED}Error:${NC} invalid cage settings in $CAGE_CONFIG:" >&2
+        local line
+        while IFS= read -r line; do echo "  - $line" >&2; done <<< "${out#ERR$'\t'}"
+        return 1
+    fi
+    # jq prints nothing for an empty file and one line per value for several:
+    # exactly one assignment line is the only valid outcome
+    if [[ $out != CFG_CLOSE_ASK=* ]] || [[ $out == *$'\n'* ]]; then
+        echo -e "${RED}Error:${NC} cage settings must hold exactly one JSON object: $CAGE_CONFIG" >&2
+        return 1
+    fi
+    eval "$out"
+}
 
 # JSON output schema for background sessions
 CAGE_JSON_OUTPUT_FLAGS='--output-format json --json-schema {"type":"object","properties":{"status":{"type":"string","enum":["success","error","partial"]},"summary":{"type":"string"},"files_created":{"type":"array","items":{"type":"string"}},"files_modified":{"type":"array","items":{"type":"string"}},"files_read":{"type":"array","items":{"type":"string"}},"errors":{"type":"array","items":{"type":"string"}},"data":{"type":"object"},"next_steps":{"type":"array","items":{"type":"string"}}},"required":["status","summary"]}'
 
-# Parse a session reference and return full path to a session file
-# Accepts: s<days>-<num>, cage-YYYY-MM-DD-N, a UUID, or a /rename'd display
-# name. The [sS] and [-_] classes exist because stored meta .name fields and
+# The session reference forms that win over a display name, in resolution
+# order: relative code (days ago, number), absolute handle (date, number),
+# UUID. The [sS] and [-_] classes exist because stored meta .name fields and
 # transcripts contain underscore spellings — both must keep resolving. The
 # day count may be negative (registry dir dated ahead of the local date after
-# a westward timezone change).
+# a westward timezone change). Must be expanded unquoted in [[ =~ ]]: a
+# quoted pattern is matched literally, not as a regex; the groups fill
+# BASH_REMATCH.
+_CAGE_CODE_RE='^[sS](-?[0-9]+)[-_]([0-9]+)$'
+_CAGE_HANDLE_RE='^cage[-_]([0-9]{4}-[0-9]{2}-[0-9]{2})[-_]([0-9]+)$'
+_CAGE_UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# True when <s> parses as a code, handle or UUID, i.e. it can never be
+# resolved as a display name
+# Usage: cage_is_session_ref "$s"
+cage_is_session_ref() {
+    [[ $1 =~ $_CAGE_CODE_RE ]] || [[ $1 =~ $_CAGE_HANDLE_RE ]] || [[ $1 =~ $_CAGE_UUID_RE ]]
+}
+
+# Parse a session reference and return full path to a session file
+# Accepts: s<days>-<num>, cage-YYYY-MM-DD-N, a UUID (the _CAGE_*_RE forms
+# above), or a /rename'd display name.
 # Usage: cage_get_session_file "s0-1" "result.json" -> ~/.local/state/cage/2026-01-05/cage_1.result.json
 cage_get_session_file() {
     local session="$1"
@@ -36,7 +107,7 @@ cage_get_session_file() {
     local session_num=""
 
     # Parse s<days>-<num> relative format (e.g., s0-1, s1-3, s-1-2)
-    if [[ $session =~ ^[sS](-?[0-9]+)[-_]([0-9]+)$ ]]; then
+    if [[ $session =~ $_CAGE_CODE_RE ]]; then
         local days_ago=${BASH_REMATCH[1]}
         session_num=${BASH_REMATCH[2]}
         # Force base-10 with the sign split off — a hand-typed leading zero
@@ -51,11 +122,11 @@ cage_get_session_file() {
         local today_epoch=$(cage_today_epoch)
         target_date=$(date -ud "@$(( today_epoch - days_ago * 86400 ))" +%Y-%m-%d)
     # Parse cage-YYYY-MM-DD-N absolute format (e.g., cage-2026-01-05-1)
-    elif [[ $session =~ ^cage[-_]([0-9]{4}-[0-9]{2}-[0-9]{2})[-_]([0-9]+)$ ]]; then
+    elif [[ $session =~ $_CAGE_HANDLE_RE ]]; then
         target_date=${BASH_REMATCH[1]}
         session_num=${BASH_REMATCH[2]}
     # UUID format: search meta.json files for matching uuid
-    elif [[ $session =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    elif [[ $session =~ $_CAGE_UUID_RE ]]; then
         local meta_file
         meta_file=$(grep -l "\"uuid\": \"$session\"" "${CAGE_STORAGE}"/*/*.meta.json < /dev/null 2>/dev/null | head -1)
         if [ -z "$meta_file" ]; then
@@ -67,18 +138,10 @@ cage_get_session_file() {
         session_num=${base#cage_}
         target_date=$(basename "$(dirname "$meta_file")")
     else
-        # /rename'd display name: compare against the last custom-title of every
-        # session's transcript (runs only when no code/UUID form matched above)
-        local rows
-        rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 1
-        local matches=() mf muuid mcwd dn
-        if [ -n "$rows" ]; then
-            while IFS=$'\t' read -r mf muuid mcwd; do
-                [ -n "$muuid" ] && [ -n "$mcwd" ] || continue
-                dn=$(cage_display_name "$mcwd" "$muuid") || continue
-                [ "$dn" = "$session" ] && matches+=("$mf")
-            done <<< "$rows"
-        fi
+        # /rename'd display name (runs only when no code/UUID form matched above)
+        local found matches=()
+        found=$(cage_sessions_named "$session") || return 1
+        [ -n "$found" ] && mapfile -t matches <<< "$found"
         if [ ${#matches[@]} -eq 0 ]; then
             echo "No session found: $session (accepts s<days>-<n>, cage-YYYY-MM-DD-N, UUID, or a /rename'd name)" >&2
             return 1
@@ -111,6 +174,29 @@ cage_get_session_file() {
     esac
 }
 
+# Meta paths of every session whose current display name (the last
+# custom-title of its transcript) equals <name>, one per line. A pinned
+# session whose transcript the sweep deleted is named by its archive copy,
+# so it still resolves and the resume can restore it. Scans every
+# transcript, so it takes seconds on a large registry.
+# Usage: found=$(cage_sessions_named "$name") || return 1
+cage_sessions_named() {
+    local rows
+    rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // ""') || return 1
+    [ -n "$rows" ] || return 0
+    local mf muuid mcwd mkeep file dn
+    while IFS="$_CAGE_ROW_SEP" read -r mf muuid mcwd mkeep; do
+        [ -n "$muuid" ] && [ -n "$mcwd" ] || continue
+        cage_transcript_path_var file "$mcwd" "$muuid"
+        if [ ! -f "$file" ] && cage_pin_active "$mkeep"; then
+            cage_archive_path_var file "$muuid"
+        fi
+        dn=$(cage_title_in_file "$file") || continue
+        [ "$dn" = "$1" ] && printf '%s\n' "$mf"
+    done <<< "$rows"
+    return 0
+}
+
 # Resolve a session reference to its UUID
 # Usage: cage_resolve_uuid "s0-1" -> 351f41fe-ac51-4cfd-8e4f-a8105e0adf8a
 cage_resolve_uuid() {
@@ -140,17 +226,25 @@ cage_all_meta_files() {
     find "${CAGE_STORAGE}" -mindepth 2 -maxdepth 2 -name "*.meta.json" -printf '%T@\t%p\0' 2>/dev/null | sort -rzn | cut -zf2
 }
 
-# Project fields from every registry meta as TSV rows (first column is always
-# the meta path), newest first. Empty output when the registry is empty. jq
+# Field separator of cage_meta_rows and of the resume picker's cache. Not a
+# tab: tab is IFS whitespace, so `read` would merge the tabs around an empty
+# field (a meta without keep_until or task) and shift every later field one
+# to the left.
+_CAGE_ROW_SEP=$'\x1f'
+
+# Project fields from every registry meta as rows separated by _CAGE_ROW_SEP
+# (first field is always the meta path; newlines and separators inside values
+# become spaces), newest first. Empty output when the registry is empty. jq
 # aborts at the first corrupt file — that failure is surfaced loudly (jq's own
 # error names the file) instead of silently dropping the sessions after it.
 # Usage: rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 1
+#        while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd; do ...; done <<< "$rows"
 cage_meta_rows() {
     local projection="$1"
     local metas=() f
     while IFS= read -r -d '' f; do metas+=("$f"); done < <(cage_all_meta_files)
     [ ${#metas[@]} -eq 0 ] && return 0
-    jq -r "[input_filename, ${projection}] | @tsv" "${metas[@]}" || {
+    jq -r "[input_filename, ${projection}] | map(tostring | gsub(\"[\\n\\u001f]\"; \" \")) | join(\"\\u001f\")" "${metas[@]}" || {
         echo -e "${RED}Error:${NC} corrupt meta.json in ${CAGE_STORAGE} (see jq error above)" >&2
         return 1
     }
@@ -281,32 +375,84 @@ cage_has_conversation() {
     [ -f "$_chc_path" ]
 }
 
-# Current display name of a session: the LAST custom-title record in the
-# transcript (cage sets one at launch via --name; in-session /rename appends
-# another). Prints nothing and returns 1 when transcript or title is missing —
-# callers fall back to the meta .name explicitly.
-# Usage: cage_display_name cwd uuid
-cage_display_name() {
-    local transcript
-    transcript=$(cage_transcript_path "$1" "$2")
-    [ -f "$transcript" ] || return 1
+# Path of a session's archive copy (pinned sessions), into the named
+# variable; its subagent dir is the same path minus .jsonl, as for the
+# transcript
+# Usage: cage_archive_path_var out_var uuid
+cage_archive_path_var() {
+    local -n _cap_out="$1"
+    _cap_out="${CAGE_ARCHIVE}/${2}.jsonl"
+}
+
+# The LAST custom-title record in a transcript file (cage sets one at launch
+# via --name; in-session /rename appends another). Prints nothing and returns
+# 1 when the file or a title is missing.
+# Usage: cage_title_in_file "$transcript_or_archive_copy"
+cage_title_in_file() {
+    [ -f "$1" ] || return 1
     # Unanchored grep prefilter (matches the "custom-title" type VALUE anywhere
     # in the line, so serialization/key-order changes don't break it) keeps the
     # scan cheap on multi-MB transcripts; jq then parses only candidate lines,
     # discarding false positives from conversation text.
     local title
-    title=$(tac "$transcript" | grep -a '"custom-title"' \
+    title=$(tac "$1" | grep -a '"custom-title"' \
         | jq -Rr 'fromjson? | select(.type=="custom-title") | .customTitle // empty' 2>/dev/null \
         | grep -m1 . )
     [ -n "$title" ] || return 1
     printf '%s\n' "$title"
 }
 
+# Current display name of a session, from its transcript (see
+# cage_title_in_file). Returns 1 when transcript or title is missing —
+# callers fall back to the meta .name explicitly.
+# Usage: cage_display_name cwd uuid
+cage_display_name() {
+    local transcript
+    cage_transcript_path_var transcript "$1" "$2"
+    cage_title_in_file "$transcript"
+}
+
+# True when a session was /rename'd: its current title is set and differs
+# from the meta .name cage launched it with. The one place that rule lives
+# (the picker applies it to its cached titles).
+# Usage: cage_is_renamed "$title" "$meta_name"
+cage_is_renamed() {
+    [ -n "$1" ] && [ "$1" != "$2" ]
+}
+
+# A session's current display name (the meta .name when it has no title) and
+# whether it was /rename'd, into the named variables
+# Usage: cage_named_var dn_var named_var cwd uuid meta_name
+cage_named_var() {
+    local -n _cnv_dn="$1" _cnv_named="$2"
+    _cnv_dn=$(cage_display_name "$3" "$4") || _cnv_dn="$5"
+    _cnv_named=false
+    cage_is_renamed "$_cnv_dn" "$5" && _cnv_named=true
+    return 0
+}
+
+# Run a jq program (read with -n, so it consumes `inputs` itself) over the
+# lines of a transcript that mention a record type value (the grep
+# prefilter, e.g. '"user"', keeps multi-hundred-MB transcripts cheap; jq
+# still checks the type). Fails when either side fails: grep exit 2 is a
+# read error (1 = no match, and a SIGPIPE after jq stopped early, are not),
+# and jq's own status otherwise. Output is jq's.
+# Usage: out=$(_cage_jq_records '"user"' "$transcript" [jq args...] "$program") || ...
+_cage_jq_records() {
+    local pattern="$1" file="$2"
+    shift 2
+    grep -a -- "$pattern" "$file" | jq -nRr "$@"
+    local -a st=("${PIPESTATUS[@]}")
+    [ "${st[0]}" -eq 2 ] && return 2
+    return "${st[1]}"
+}
+
 # jq program emitting each real user prompt from a transcript, one per line
 # (isMeta records, command noise, tool_result-only messages and
-# [Request interrupted…] markers are skipped; newlines collapsed). Shared by
-# cage_session_context / cage_real_prompt_count; the resume picker's cache key
-# hashes it, so editing it invalidates that cache by itself.
+# [Request interrupted…] markers are skipped; newlines collapsed). Used only
+# by cage_prompt_summary, which every prompt consumer reads; the resume
+# picker's cache key hashes it, so editing it invalidates that cache by
+# itself.
 _CAGE_PROMPT_JQ='fromjson?
     | select(.type=="user" and (.isMeta != true))
     | .message.content
@@ -315,58 +461,166 @@ _CAGE_PROMPT_JQ='fromjson?
     | select(startswith("[Request interrupted")|not)
     | gsub("[\\n\\t]+"; " ")'
 
-# One-line "what was this session about" snippet: the first real user prompt.
-# Prints nothing and returns 1 when the transcript or a prompt is missing —
-# callers skip the line.
-# Usage: cage_session_context cwd uuid
-cage_session_context() {
-    local transcript
-    transcript=$(cage_transcript_path "$1" "$2")
-    [ -f "$transcript" ] || return 1
-    local ctx
-    ctx=$(jq -Rr "$_CAGE_PROMPT_JQ" "$transcript" 2>/dev/null | head -n 1)
-    [ -n "$ctx" ] || return 1
-    printf '%s\n' "$ctx"
+# First prompt and prompt count (capped at <cap>) in one scan: the one place
+# prompts are extracted, read by every prompt consumer. A grep prefilter on
+# the "user" type value hands jq only candidate lines, which keeps
+# multi-hundred-MB transcripts fast; jq still decides what a real prompt is.
+# Prints "<count>\t<first prompt>"; returns 1 when the scan failed (error
+# printed), so a broken scan never reads as "no prompts".
+# Usage: out=$(cage_prompt_summary "$cwd" "$uuid" 10) || ...
+#        IFS=$'\t' read -r count first <<< "$out"
+cage_prompt_summary() {
+    local transcript out prompts=()
+    cage_transcript_path_var transcript "$1" "$2"
+    if [ -f "$transcript" ]; then
+        out=$(_cage_jq_records '"user"' "$transcript" --argjson n "$3" "limit(\$n; inputs | $_CAGE_PROMPT_JQ)") || {
+            echo -e "${RED}Error:${NC} cannot read the prompts of $transcript (error above)" >&2
+            return 1
+        }
+        [ -n "$out" ] && mapfile -t prompts <<< "$out"
+    fi
+    printf '%s\t%s\n' "${#prompts[@]}" "${prompts[0]-}"
 }
 
-# Number of real user prompts in the transcript, capped at 2: callers only
-# distinguish 0/1 from "2 or more", and the cap keeps the scan cheap.
-# Usage: cage_real_prompt_count cwd uuid -> 0|1|2
-cage_real_prompt_count() {
-    local transcript
-    transcript=$(cage_transcript_path "$1" "$2")
-    [ -f "$transcript" ] || { echo 0; return; }
-    jq -Rr "$_CAGE_PROMPT_JQ" "$transcript" 2>/dev/null | head -n 2 | wc -l
+# One-line "what was this session about" snippet: the first real user prompt.
+# Prints nothing and returns 1 when the transcript or a prompt is missing —
+# callers skip the line — and 2 when the scan failed (error printed). Reads
+# cage_prompt_summary, the one place that extracts prompts.
+# Usage: cage_session_context cwd uuid
+cage_session_context() {
+    local _csc_out _csc_count _csc_first
+    _csc_out=$(cage_prompt_summary "$1" "$2" 1) || return 2
+    IFS=$'\t' read -r _csc_count _csc_first <<< "$_csc_out"
+    [ -n "$_csc_first" ] || return 1
+    printf '%s\n' "$_csc_first"
+}
+
+# jq definitions shared by _CAGE_INPUT_JQ and _CAGE_NONTEXT_JQ, so the two
+# checks cannot drift apart: what a slash-command record looks like, and the
+# walk over a user record's content (a plain string, or an array of items:
+# a tool_result item never counts, any other non-text item always does, a
+# text item when its text passes p). user_input(p) prints "1" per match.
+_CAGE_USER_INPUT_DEFS='def slash_record: test("^<(command-|local-command-)");
+    def user_input(p):
+        fromjson?
+        | select(.type=="user" and (.isMeta != true))
+        | .message.content
+        | if type=="array"
+          then any(.[]; type=="object" and .type != "tool_result" and (.type != "text" or (.text|p)))
+          else p end
+        | select(.) | 1;'
+
+# jq program printing "1" for any user record someone typed or pasted, text
+# prompt or not: markup, an image, a bash-mode command. What does not count:
+# isMeta records, the records slash commands write (<command-…>,
+# <local-command-…>), [Request interrupted…] markers and tool_result-only
+# messages. Both content forms get the same tests: a plain string, or an
+# array of items (Claude Code writes interrupt markers and some slash-command
+# records as text items). Broader than _CAGE_PROMPT_JQ on purpose: it decides
+# whether a session may be deleted without asking.
+_CAGE_INPUT_JQ="$_CAGE_USER_INPUT_DEFS"'
+    def typed: type=="string" and length>0 and (slash_record|not)
+        and (startswith("[Request interrupted")|not);
+    user_input(typed)'
+
+# Whether the session had any input: Claude answered at all (a session run
+# only through a skill or custom slash command has no typed record, yet
+# real work), or someone typed or pasted something (see _CAGE_INPUT_JQ). A
+# session with neither was opened and closed: cage new deletes it without
+# asking, so a failing check must never read as "no input". Returns 0
+# input, 1 none, 2 when a scan failed (grep or jq; the error is shown). A
+# missing transcript returns 1 on purpose: claude was never reached or wrote
+# nothing, so there is nothing to keep.
+# Usage: cage_has_user_input cwd uuid; case $? in ...
+cage_has_user_input() {
+    local transcript hit
+    cage_transcript_path_var transcript "$1" "$2"
+    [ -f "$transcript" ] || return 1
+    local fail="cannot check the session for input: $transcript (error above)"
+    hit=$(_cage_jq_records '"assistant"' "$transcript" 'first(inputs | fromjson? | select(.type=="assistant") | 1)') || {
+        echo -e "${RED}Error:${NC} $fail" >&2
+        return 2
+    }
+    if [ -z "$hit" ]; then
+        hit=$(_cage_jq_records '"user"' "$transcript" "first(inputs | $_CAGE_INPUT_JQ)") || {
+            echo -e "${RED}Error:${NC} $fail" >&2
+            return 2
+        }
+    fi
+    [ -n "$hit" ]
+}
+
+# jq program printing "1" for a user record holding non-text input: an
+# image or other non-text item, or pasted markup (a string or text item
+# starting with "<" that is not a slash-command record). _CAGE_PROMPT_JQ
+# drops all of these, so a short caption under a screenshot or a pasted log
+# would otherwise look like a near-empty session.
+_CAGE_NONTEXT_JQ="$_CAGE_USER_INPUT_DEFS"'
+    def markup: type=="string" and startswith("<") and (slash_record|not);
+    user_input(markup)'
+
+# Whether the session holds non-text input (see _CAGE_NONTEXT_JQ). Returns 0
+# yes, 1 no (a missing transcript included), 2 when the scan failed (the
+# error is shown).
+# Usage: cage_has_nontext_input cwd uuid; case $? in ...
+cage_has_nontext_input() {
+    local transcript hit
+    cage_transcript_path_var transcript "$1" "$2"
+    [ -f "$transcript" ] || return 1
+    hit=$(_cage_jq_records '"user"' "$transcript" "first(inputs | $_CAGE_NONTEXT_JQ)") || {
+        echo -e "${RED}Error:${NC} cannot check the session for pasted input: $transcript (error above)" >&2
+        return 2
+    }
+    [ -n "$hit" ]
 }
 
 # Near-empty: an interactive session that never went anywhere — no task, no
-# result, not /rename'd, and at most one greeting-sized prompt (<25 chars).
-# A single SUBSTANTIAL question is normal quick-Q&A usage and never counts.
-# Session listings hide these by default and the interactive exit paths offer
-# to delete them on the spot.
-# Usage: cage_is_near_empty cwd uuid meta_file
+# result, not /rename'd, at most short_max_prompts prompts and a first prompt
+# of at most short_prompt_max_chars characters (cage settings; needs
+# cage_load_config); never with pasted markup or images
+# (cage_has_nontext_input), and with no text prompt at all only when nothing
+# else happened either (cage_has_user_input). A SUBSTANTIAL first question is
+# normal quick-Q&A usage and never counts, and a failed scan never counts.
+# Listings hide these by default, and the close menu defaults to Delete for
+# them when close_default is auto. Called with 3 arguments it scans; a
+# caller that already holds the facts passes all three so nothing is
+# recomputed: the first prompt, whether the session is /rename'd (true|false,
+# or empty to look it up only if needed) and the prompt count (exact up to
+# at least short_max_prompts + 1).
+# Usage: cage_is_near_empty cwd uuid meta_file [first named count]
 cage_is_near_empty() {
     local cwd="$1" uuid="$2" meta_file="$3"
     [ -f "${meta_file%.meta.json}.result.json" ] && return 1
     [ -n "$(jq -r '.task // ""' "$meta_file" 2>/dev/null)" ] && return 1
-    local first
-    if [ $# -ge 4 ]; then
-        # caller already extracted the first prompt — reuse, don't rescan
-        first="$4"
-        [ -z "$first" ] && return 0
-    else
-        first=$(cage_session_context "$cwd" "$uuid") || return 0
+    local first="$4" named="$5" count="$6"
+    if [ $# -eq 3 ]; then
+        # One scan for the count and the first prompt; a failed scan (error
+        # printed) is never near-empty
+        local summary
+        summary=$(cage_prompt_summary "$cwd" "$uuid" $(( CFG_SHORT_MAX_PROMPTS + 1 ))) || return 1
+        IFS=$'\t' read -r count first <<< "$summary"
     fi
-    # A substantial first prompt settles it here: the expensive whole-file
-    # scans below then only ever run on short-first-prompt sessions, whose
-    # transcripts are tiny
-    [ "${#first}" -ge 25 ] && return 1
-    # a /rename'd session was deliberately labeled — never debris
-    local name dn
-    name=$(jq -r '.name // ""' "$meta_file" 2>/dev/null)
-    dn=$(cage_display_name "$cwd" "$uuid") || dn="$name"
-    [ "$dn" != "$name" ] && return 1
-    [ "$(cage_real_prompt_count "$cwd" "$uuid")" -lt 2 ]
+    [ "${#first}" -gt "$CFG_SHORT_PROMPT_MAX_CHARS" ] && return 1
+    [ "$count" -le "$CFG_SHORT_MAX_PROMPTS" ] || return 1
+    # a /rename'd session was deliberately labeled — never debris, whatever
+    # its prompts. Looked up only now, for the few rows still in question.
+    if [ -z "$named" ]; then
+        local dn
+        cage_named_var dn named "$cwd" "$uuid" "$(jq -r '.name // ""' "$meta_file" 2>/dev/null)"
+    fi
+    [ "$named" = true ] && return 1
+    # Pasted markup or images make a session real whatever its text prompts
+    # (a short caption under a screenshot); a failed check counts as input
+    cage_has_nontext_input "$cwd" "$uuid"
+    [ $? -eq 1 ] || return 1
+    # No text prompt: near-empty only when nothing else happened either (no
+    # Claude reply to a skill or custom command)
+    if [ "$count" -eq 0 ]; then
+        cage_has_user_input "$cwd" "$uuid"
+        [ $? -eq 1 ]
+        return
+    fi
+    return 0
 }
 
 # Remove every registry file of one session row; prunes the dated dir once it
@@ -381,20 +635,242 @@ cage_remove_session_files() {
     return 0
 }
 
-# Offer to delete a near-empty session right after it closed (interactive
-# exits of cage new and cage resume; Enter = clean), so test debris never
-# accumulates. Returns 0 when the row was removed, 1 when it was kept or is
-# not near-empty, 2 when the removal failed (error printed).
-# Usage: cage_offer_near_empty_cleanup cwd uuid meta_file session_name
-cage_offer_near_empty_cleanup() {
-    local cwd="$1" uuid="$2" meta_file="$3" session_name="$4"
-    [ -t 0 ] && cage_is_near_empty "$cwd" "$uuid" "$meta_file" || return 1
-    gum confirm --affirmative "Clean" --negative "Keep" "Near-empty session (single short prompt) — clean it now?" || return 1
-    cage_remove_session_files "$meta_file" || {
-        echo -e "${RED}Error:${NC} cannot remove near-empty session $session_name (rm error above)" >&2
-        return 2
+# Refuse a malformed session uuid before any recursive removal built from it:
+# the subagent dir is the transcript path minus .jsonl and the archive copy is
+# ${CAGE_ARCHIVE}/<uuid>, so an empty uuid would name a whole project dir or
+# the whole archive.
+# Usage: cage_require_uuid "$uuid" || return 1
+cage_require_uuid() {
+    [[ $1 =~ $_CAGE_UUID_RE ]] && return 0
+    echo -e "${RED}Error:${NC} invalid session uuid '$1'" >&2
+    return 1
+}
+
+# Remove a registry row and its archive copy, if any (a pin that has expired
+# leaves one behind, which nothing else would ever reach). Claude's
+# transcript is not touched. A row without a uuid (an allocation placeholder)
+# has no archive copy.
+# Usage: cage_remove_session_row "$meta_file" "$uuid" || return 1
+cage_remove_session_row() {
+    if [ -n "$2" ]; then
+        cage_require_uuid "$2" || return 1
+        local copy
+        cage_archive_path_var copy "$2"
+        rm -rf -- "$copy" "${copy%.jsonl}" || return 1
+    fi
+    cage_remove_session_files "$1"
+}
+
+# Delete a session everywhere: Claude's transcript and its subagent dir, the
+# pinned archive copy, and the registry row. Irreversible.
+# Usage: cage_delete_session "$meta_file" "$cwd" "$uuid" || return 1
+cage_delete_session() {
+    local meta_file="$1" cwd="$2" uuid="$3" transcript
+    cage_require_uuid "$uuid" || return 1
+    cage_transcript_path_var transcript "$cwd" "$uuid"
+    rm -rf -- "$transcript" "${transcript%.jsonl}" || return 1
+    cage_remove_session_row "$meta_file" "$uuid"
+}
+
+# True while a keep_until date (YYYY-MM-DD, from meta) has not passed
+# Usage: cage_pin_active "$keep_until"
+cage_pin_active() {
+    [ -n "$1" ] && [[ ! $1 < $(date +%Y-%m-%d) ]]
+}
+
+# Copy a session's transcript (and its subagent dir) into the archive, so a
+# pinned session survives Claude Code's retention sweep. Each copy replaces
+# the previous one; the transcript must exist.
+# Usage: cage_archive_transcript "$cwd" "$uuid" || return 1
+cage_archive_transcript() {
+    local transcript copy
+    cage_require_uuid "$2" || return 1
+    cage_transcript_path_var transcript "$1" "$2"
+    cage_archive_path_var copy "$2"
+    if [ ! -f "$transcript" ]; then
+        echo -e "${RED}Error:${NC} cannot archive: no transcript at $transcript" >&2
+        return 1
+    fi
+    mkdir -p "${copy%/*}" || return 1
+    cp -- "$transcript" "$copy.tmp" && mv -- "$copy.tmp" "$copy" || {
+        rm -f -- "$copy.tmp"
+        return 1
     }
-    echo -e "${DIM}Near-empty session removed.${NC}"
+    rm -rf -- "${copy%.jsonl}" || return 1
+    [ -d "${transcript%.jsonl}" ] && { cp -r -- "${transcript%.jsonl}" "${copy%.jsonl}" || return 1; }
+    return 0
+}
+
+# Put an archived transcript back where Claude Code looks for it. The copy
+# gets a fresh mtime, which starts a new retention period for the sweep.
+# Usage: cage_restore_transcript "$cwd" "$uuid" || return 1
+cage_restore_transcript() {
+    local transcript copy
+    cage_require_uuid "$2" || return 1
+    cage_transcript_path_var transcript "$1" "$2"
+    cage_archive_path_var copy "$2"
+    if [ ! -f "$copy" ]; then
+        echo -e "${RED}Error:${NC} pinned session $2 has neither a transcript nor an archive copy ($copy); it can never be resumed — remove its row with 'cage clean --expired'" >&2
+        return 1
+    fi
+    mkdir -p "${transcript%/*}" || return 1
+    cp -- "$copy" "$transcript" || return 1
+    # -T: when the sweep left the subagent dir in place, merge into it instead
+    # of nesting the copy inside it (<uuid>/<uuid>/), where Claude never looks
+    if [ -d "${copy%.jsonl}" ]; then
+        cp -rT -- "${copy%.jsonl}" "${transcript%.jsonl}" || return 1
+    fi
+    return 0
+}
+
+# Set one string field of a session meta in place. The temp file lives in
+# the meta's own dir, so the mv is an atomic same-filesystem rename (a reader
+# never sees half a file).
+# Usage: cage_meta_set "$meta_file" key value || return 1
+cage_meta_set() {
+    local tmp
+    tmp=$(mktemp "$1.XXXXXX") || return 1
+    if jq --arg k "$2" --arg v "$3" '.[$k] = $v' "$1" > "$tmp" && mv -- "$tmp" "$1"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    echo -e "${RED}Error:${NC} cannot set $2 in $1 (error above)" >&2
+    return 1
+}
+
+# Pin a session ("Keep long"): keep_until = today + pin_days (cage settings),
+# and archive its transcript now.
+# Usage: cage_pin_session "$meta_file" "$cwd" "$uuid" || return 1
+cage_pin_session() {
+    local meta_file="$1" keep_until
+    keep_until=$(date -d "+${CFG_PIN_DAYS} days" +%Y-%m-%d)
+    cage_archive_transcript "$2" "$3" || return 1
+    cage_meta_set "$meta_file" keep_until "$keep_until" || return 1
+    echo -e "${GREEN}✓${NC} Pinned until ${keep_until} (transcript archived in ${CAGE_ARCHIVE})"
+}
+
+# Name a session exactly the way /rename does: append Claude's title records
+# to the transcript (claude has exited, so nothing else writes it). The name
+# then shows in cage status and the picker and resolves with cage resume.
+# Refuses a name that parses as a session code, handle or UUID: those forms
+# win at resolution, so the name could never be resumed by. A name another
+# session already carries is accepted, as with /rename; cage resume <name>
+# then refuses and lists both handles.
+# Usage: cage_name_session "$cwd" "$uuid" "$name" || return 1
+cage_name_session() {
+    local cwd="$1" uuid="$2" name="$3" transcript
+    if [ -z "$name" ]; then
+        echo -e "${RED}Error:${NC} empty name" >&2
+        return 1
+    fi
+    if cage_is_session_ref "$name"; then
+        echo -e "${RED}Error:${NC} '$name' looks like a session code, handle or UUID; pick a distinctive name" >&2
+        return 1
+    fi
+    cage_transcript_path_var transcript "$cwd" "$uuid"
+    # Appending to a missing transcript would create a stub of two title
+    # records, which a pinned session's archive refresh would then copy over
+    # the only full copy
+    if [ ! -f "$transcript" ]; then
+        echo -e "${RED}Error:${NC} cannot name: no transcript at $transcript" >&2
+        return 1
+    fi
+    jq -nc --arg n "$name" --arg s "$uuid" \
+        '{type: "custom-title", customTitle: $n, sessionId: $s}, {type: "agent-name", agentName: $n, sessionId: $s}' \
+        >> "$transcript"
+}
+
+# Close-time decision for an interactive session (cage new calls it only when
+# the session had user input; an interactive resume calls it when its
+# transcript still exists), per the cage settings close_ask and
+# close_default: Keep, Keep long (pin), Name and keep, Name and keep long, or
+# Delete. Naming implies keeping, so it ends the menu. Without a terminal on
+# stdin nobody can answer, so the session is kept. A pinned session's archive
+# is refreshed whenever it is kept. Returns 0 when kept, 10 when deleted, 1 on
+# a failure (error printed).
+# Usage: cage_close_session "$cwd" "$uuid" "$meta_file" "$session_name"
+cage_close_session() {
+    local cwd="$1" uuid="$2" meta_file="$3" session_name="$4"
+    local name keep_until dn named pinned=false fields
+    # Checked: on an unreadable meta, empty name and keep_until would make
+    # the session look named and unpinned
+    fields=$(jq -r '"name=" + (.name // "" | @sh) + " keep_until=" + (.keep_until // "" | @sh)' "$meta_file") || {
+        echo -e "${RED}Error:${NC} cannot read session metadata: $meta_file" >&2
+        return 1
+    }
+    eval "$fields"
+    cage_named_var dn named "$cwd" "$uuid" "$name"
+    cage_pin_active "$keep_until" && pinned=true
+
+    if [ "$CFG_CLOSE_ASK" = never ] || { [ "$CFG_CLOSE_ASK" = unless-named ] && [ "$named" = true ]; } || [ ! -t 0 ]; then
+        if [ "$pinned" = true ]; then cage_archive_transcript "$cwd" "$uuid" || return 1; fi
+        return 0
+    fi
+
+    # Counted one past the larger of the header's cap and the near-empty
+    # limit, so both the "10+" label and the near-empty test read an exact
+    # answer from this one scan
+    local cap=10 summary count first="" count_label="?" limit default="Keep"
+    limit=$(( (cap > CFG_SHORT_MAX_PROMPTS ? cap : CFG_SHORT_MAX_PROMPTS) + 1 ))
+    # A failed scan (error printed) leaves the count unknown and Keep the
+    # default, whatever close_default says: nothing is pre-selected for
+    # deletion on facts cage could not read
+    if summary=$(cage_prompt_summary "$cwd" "$uuid" "$limit"); then
+        IFS=$'\t' read -r count first <<< "$summary"
+        count_label="$count"
+        [ "$count" -gt "$cap" ] && count_label="${cap}+"
+        if [ "$pinned" = false ]; then
+            case "$CFG_CLOSE_DEFAULT" in
+                delete) default="Delete" ;;
+                # The first prompt, the name and the count are known here, so
+                # the near-empty test does not redo the prompt scan (only a
+                # session with no text prompt gets the input check)
+                auto) cage_is_near_empty "$cwd" "$uuid" "$meta_file" "$first" "$named" "$count" && default="Delete" ;;
+            esac
+        fi
+    fi
+    local header choice new_name pin_label="Keep long (${CFG_PIN_DAYS} days)"
+    local name_label="Name and keep" name_pin_label="Name and keep long (${CFG_PIN_DAYS} days)"
+    header="Close ${session_name}"
+    [ "$named" = true ] && header+="  \"${dn}\""
+    header+=$'\n'"${count_label} prompt(s)"
+    [ "$pinned" = true ] && header+=" · pinned until ${keep_until}"
+    header+=" · ${first:0:60}"
+    while :; do
+        # Esc picks nothing: keep, the choice that loses nothing
+        choice=$(gum choose --header "$header" --selected "$default" \
+            "Keep" "$pin_label" "$name_label" "$name_pin_label" "Delete") || choice="Keep"
+        case "$choice" in
+            Keep)
+                if [ "$pinned" = true ]; then cage_archive_transcript "$cwd" "$uuid" || return 1; fi
+                return 0
+                ;;
+            "$pin_label")
+                cage_pin_session "$meta_file" "$cwd" "$uuid" || return 1
+                return 0
+                ;;
+            "$name_label"|"$name_pin_label")
+                # Esc in the name prompt goes back to the menu
+                new_name=$(gum input --placeholder "Session name (resume it with: cage resume <name>)" --value "$([ "$named" = true ] && printf '%s' "$dn")") || continue
+                cage_name_session "$cwd" "$uuid" "$new_name" || continue
+                echo -e "${GREEN}✓${NC} Named \"${new_name}\" — resume with: cage resume \"${new_name}\""
+                if [ "$choice" = "$name_pin_label" ]; then
+                    cage_pin_session "$meta_file" "$cwd" "$uuid" || return 1
+                elif [ "$pinned" = true ]; then
+                    cage_archive_transcript "$cwd" "$uuid" || return 1
+                fi
+                return 0
+                ;;
+            Delete)
+                cage_delete_session "$meta_file" "$cwd" "$uuid" || {
+                    echo -e "${RED}Error:${NC} cannot delete session $session_name (error above)" >&2
+                    return 1
+                }
+                echo -e "${DIM}Session deleted (registry row, transcript and archive).${NC}"
+                return 10
+                ;;
+        esac
+    done
 }
 
 # True when a registry row's pid file points at a live process
@@ -406,40 +882,61 @@ cage_meta_running() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
-# Delete registry rows that can never be resumed: no transcript (Claude Code
-# purged it after cleanupPeriodDays, or claude was never reached). Rows with a
-# background log or result are kept (cage result/tail/check still read them);
-# RUNNING rows and today's rows (a launch may not have written its transcript
-# yet) are never touched. These exemptions apply only to this automatic,
-# unconfirmed prune: the confirmed `cage clean --expired` deliberately also
-# removes today's and log/result rows. A row whose project dir does not exist
+# Keep the registry in step with Claude Code's transcripts. A pinned row
+# (keep_until not passed) whose transcript the retention sweep deleted gets it
+# restored from the archive. Every other row with no transcript (Claude Code
+# purged it after cleanupPeriodDays, or claude was never reached) can never
+# be resumed and is deleted, together with any archive copy an expired pin
+# left. Rows with a background log or result are kept (cage
+# result/tail/check still read them); RUNNING rows and today's rows (a launch
+# may not have written its transcript yet) are never touched. These
+# exemptions apply only to this automatic, unconfirmed prune: the confirmed
+# `cage clean --expired` deliberately also removes today's and log/result
+# rows. A row whose project dir does not exist
 # at all is also spared: that points at a slug cage computed wrongly rather
 # than a purged transcript, and an unconfirmed delete must not rest on it.
-# Prints one notice when anything was removed.
-# Usage: cage_prune_unresumable || return 1
-cage_prune_unresumable() {
+# Prints one notice per kind of change.
+# Usage: cage_tidy_registry || return 1
+cage_tidy_registry() {
     local rows
-    rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 1
+    rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // ""') || return 1
     [ -n "$rows" ] || return 0
-    local today pruned=0 mf uuid cwd day_dir base transcript
+    local today pruned=0 restored=0 unrestorable=0 mf uuid cwd keep_until day_dir base transcript
     today=$(date +%Y-%m-%d)
-    while IFS=$'\t' read -r mf uuid cwd; do
+    while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd keep_until; do
         cage_transcript_path_var transcript "$cwd" "$uuid"
         [ -f "$transcript" ] && continue
+        # A failed restore (error printed) is counted, not fatal: one broken
+        # pin must not stop the other rows from being restored or pruned
+        if cage_pin_active "$keep_until"; then
+            if cage_restore_transcript "$cwd" "$uuid"; then
+                restored=$((restored + 1))
+            else
+                unrestorable=$((unrestorable + 1))
+            fi
+            continue
+        fi
         [ -d "${transcript%/*}" ] || continue
         day_dir="${mf%/*}"
         [ "${day_dir##*/}" = "$today" ] && continue
         cage_meta_running "$mf" && continue
         base="${mf%.meta.json}"
         { [ -f "$base.log" ] || [ -f "$base.result.json" ] || [ -f "$base.result.md" ]; } && continue
-        cage_remove_session_files "$mf" || {
-            echo -e "${RED}Error:${NC} cannot prune $(cage_handle_from_meta "$mf") (rm error above); ${pruned} record(s) were removed before it" >&2
+        cage_remove_session_row "$mf" "$uuid" || {
+            echo -e "${RED}Error:${NC} cannot prune $(cage_handle_from_meta "$mf") (error above); ${pruned} record(s) were removed before it" >&2
             return 1
         }
         pruned=$((pruned + 1))
     done <<< "$rows"
+    if [ "$restored" -gt 0 ]; then
+        echo -e "${DIM}Restored ${restored} pinned transcript(s) from ${CAGE_ARCHIVE}${NC}" >&2
+    fi
     if [ "$pruned" -gt 0 ]; then
         echo -e "${DIM}Pruned ${pruned} unresumable session record(s): no transcript left (background logs/results are kept)${NC}" >&2
+    fi
+    if [ "$unrestorable" -gt 0 ]; then
+        echo -e "${RED}Error:${NC} ${unrestorable} pinned session(s) could not be restored (errors above)" >&2
+        return 1
     fi
     return 0
 }
@@ -484,7 +981,12 @@ cage_resolve_status() {
     fi
 }
 
-# Wrap interactive claude session with PID tracking and terminal background color
+# Wrap interactive claude session with PID tracking and terminal background
+# color. The pid file stays until the close menu is done (cage_interactive_end
+# after cage_close_session): while it shows, the session still counts as
+# RUNNING, so no -p job or second resume can start on a transcript the menu
+# may delete, rename or pin. The color goes back as soon as claude exits
+# (cage_interactive_colors_off), so the menu is drawn in shell colors.
 # Usage: cage_interactive_start "$pid_file"; ...; cage_interactive_end "$pid_file"
 cage_interactive_start() {
     local pid_file="$1"
@@ -492,10 +994,14 @@ cage_interactive_start() {
     [ -t 1 ] && printf '\e]11;%s\a' "${COLOR_bg_claude:-#301000}"
 }
 
-cage_interactive_end() {
-    local pid_file="$1"
+cage_interactive_colors_off() {
     [ -t 1 ] && printf '\e]11;%s\a' "${COLOR_bg_shell:-#300020}"
-    rm -f "$pid_file"
+    return 0
+}
+
+cage_interactive_end() {
+    cage_interactive_colors_off
+    rm -f "$1"
 }
 
 # Follow-the-session cd: when the cage() shell wrapper (dotfiles
@@ -553,7 +1059,7 @@ cage_ensure_cwd() {
 # A registry row without a transcript cannot be resumed (the transcript aged
 # past Claude Code's retention, or claude was never reached). Resuming one
 # fails loudly and leaves the row alone: removing rows is the job of
-# cage_prune_unresumable (listing paths) and cage clean, not of a resume.
+# cage_tidy_registry (listing paths) and cage clean, not of a resume.
 # The picker never offers a transcript-less row and RUNNING rows are refused
 # earlier by cage_refuse_if_running, so this fires only when a resume names
 # such a row directly (e.g. one the prune spared or has not reached yet).
@@ -567,17 +1073,20 @@ cage_require_transcript() {
 
 # Load and validate a session's meta for resuming: parse the fields, verify
 # name/cwd presence, and run the resume guards (running-session refusal, cwd
-# recreation, transcript existence). Sets globals: _cage_meta_file, _cage_name
-# (the canonical absolute handle — callers should replace their user-typed
-# reference with it, since relative codes shift at midnight), _cage_profile,
-# _cage_cwd, _cage_model, _cage_effort, _cage_tools, _cage_sys_prompt, and the
-# array _cage_plugin_dirs (each checked to still exist).
+# recreation, restoring a pinned session's transcript from the archive when
+# the sweep deleted it, transcript existence). Sets globals: _cage_meta_file,
+# _cage_name (the canonical absolute handle — callers should replace their
+# user-typed reference with it, since relative codes shift at midnight),
+# _cage_profile, _cage_cwd, _cage_model, _cage_effort, _cage_tools,
+# _cage_sys_prompt, and the array _cage_plugin_dirs (each checked to still
+# exist).
 # Usage: cage_load_resume_meta "$session" "$uuid" || return 1
 cage_load_resume_meta() {
     local session="$1" uuid="$2"
     _cage_meta_file=$(cage_get_session_file "$session" "meta.json")
     _cage_name="" _cage_profile="" _cage_cwd="" _cage_model=""
     _cage_effort="" _cage_tools="" _cage_sys_prompt=""
+    local keep_until=""
     _cage_plugin_dirs=()
     if [ ! -f "$_cage_meta_file" ]; then
         echo -e "${RED}Error:${NC} metadata file missing for session $session — cannot resume" >&2
@@ -591,6 +1100,7 @@ cage_load_resume_meta() {
         "_cage_effort=" + (.effort // "xhigh" | @sh) + " " +
         "_cage_tools=" + (.tools // "" | @sh) + " " +
         "_cage_sys_prompt=" + (.system_prompt // "" | @sh) + " " +
+        "keep_until=" + (.keep_until // "" | @sh) + " " +
         "_cage_plugin_dirs=(" + (.plugin_dirs // [] | @sh) + ")"
     ' "$_cage_meta_file" 2>/dev/null)"
     if [ -z "$_cage_name" ] || [ -z "$_cage_cwd" ]; then
@@ -609,6 +1119,12 @@ cage_load_resume_meta() {
     done
     cage_refuse_if_running "$_cage_name" || return 1
     cage_ensure_cwd "$_cage_cwd" || return 1
+    # A pinned session outlives Claude Code's retention: bring back its
+    # transcript if the sweep deleted it
+    if cage_pin_active "$keep_until" && ! cage_has_conversation "$_cage_cwd" "$uuid"; then
+        cage_restore_transcript "$_cage_cwd" "$uuid" || return 1
+        echo -e "${DIM}Restored the pinned transcript of $_cage_name from ${CAGE_ARCHIVE}${NC}" >&2
+    fi
     cage_require_transcript "$_cage_name" "$_cage_cwd" "$uuid" || return 1
 }
 

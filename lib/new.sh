@@ -25,8 +25,14 @@ Options:
                        cage resume)
   -h, --help           Show this help
 
-An interactive session ends with your shell cd'd into its working directory
-(cage() shell wrapper; 'command cage' opts out).
+When an interactive session closes, a session where Claude never answered
+and nothing was typed or pasted (built-in commands like /model alone do not
+count) is deleted; any other gets the close menu: Keep, Keep long (pinned
+past Claude Code's retention), Name and keep / Name and keep long (naming
+as /rename does) or Delete (registry row, transcript and any archive copy).
+~/.config/cage/config.json sets when it asks and its default. Your shell
+then ends in the session's working directory (cage() shell wrapper;
+'command cage' opts out).
 
 Profiles:
 EOF
@@ -94,6 +100,10 @@ cage_new() {
             *) echo "Internal error"; return 1 ;;
         esac
     done
+
+    # The close menu needs the user settings. Loaded after the options, so
+    # --help still works when the settings file is missing or invalid.
+    cage_load_config || return 1
 
     # Background-only flags are meaningless without -p — refuse loudly
     if [ "$print_mode" = false ]; then
@@ -211,26 +221,41 @@ cage_new() {
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
         (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}" "${task_args[@]}")
         local _exit_code=$?
+        # Shell colors for the close menu; the pid file and the traps stay
+        # until it is done (see cage_interactive_start)
+        cage_interactive_colors_off
+        echo "$_exit_code" > "$status_file"
+        # Empty = Claude never answered and nothing was typed or pasted (see
+        # cage_has_user_input); anything else gets the close menu. Transcript
+        # existence stopped being the signal: claude writes the file at launch
+        # for the --name title record even when the session is closed
+        # immediately.
+        local input_rc close_rc
+        cage_has_user_input "$work_dir" "$uuid"
+        input_rc=$?
+        if [ "$input_rc" -eq 0 ]; then
+            cage_close_session "$work_dir" "$uuid" "$meta_file" "$session_name"
+            close_rc=$?
+        elif [ "$input_rc" -eq 1 ]; then
+            # Nothing to keep: removed everywhere, without asking
+            if cage_delete_session "$meta_file" "$work_dir" "$uuid"; then
+                echo -e "${DIM}Empty session removed.${NC}"
+                close_rc=10
+            else
+                echo -e "${RED}Error:${NC} cannot remove empty session $session_name (error above)" >&2
+                close_rc=1
+            fi
+        else
+            # The check failed (error printed): keep everything, decide nothing
+            close_rc=1
+        fi
         trap - EXIT INT TERM
         cage_interactive_end "$pid_file"
-        # Empty = no real user prompt ever sent. Transcript existence stopped
-        # being the signal: claude writes the file at launch for the --name
-        # title record even when the session is closed immediately.
-        if cage_session_context "$work_dir" "$uuid" >/dev/null; then
-            echo "$_exit_code" > "$status_file"
-            cage_offer_near_empty_cleanup "$work_dir" "$uuid" "$meta_file" "$session_name"
-            case $? in
-                0) return $_exit_code ;;
-                2) return 1 ;;
-            esac
-            cage_print_resume_hint "$session_name"
-        else
-            cage_remove_session_files "$meta_file" || {
-                echo -e "${RED}Error:${NC} cannot remove empty session $session_name (rm error above)" >&2
-                return 1
-            }
-            echo -e "${DIM}Empty session removed.${NC}"
-        fi
+        case $close_rc in
+            0) cage_print_resume_hint "$session_name" ;;
+            10) ;;
+            *) return 1 ;;
+        esac
         return $_exit_code
     fi
 

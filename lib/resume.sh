@@ -13,13 +13,16 @@ Arguments:
   session    Session reference: s0-3, cage-2026-01-05-1, a UUID, or a
              /rename'd display name (quote names containing spaces).
              With no argument, opens an interactive picker of every
-             resumable session; it first prunes rows that can never be
-             resumed (today's, RUNNING and background log/result rows are
-             kept).
+             resumable session; it first restores the transcripts of
+             pinned sessions that Claude Code's retention deleted, and
+             prunes rows that can never be resumed (today's, RUNNING and
+             background log/result rows are kept).
 
-When an interactive resume ends, your shell cd's into the session's working
-directory (via the cage() shell wrapper; deliberately not standard Unix
-child-process behavior — 'command cage' bypasses it).
+When an interactive resume ends, the close menu offers Keep, Keep long
+(pin), Name and keep / Name and keep long, or Delete, as after cage new.
+Your shell then ends in the session's working directory (via the cage()
+shell wrapper; deliberately not standard Unix child-process behavior —
+'command cage' bypasses it).
 
 Options:
   -p, --prompt TEXT    Background job on the SAME conversation (requires an
@@ -45,9 +48,6 @@ Examples:
 EOF
 }
 
-# Picker cache field separator: a non-whitespace IFS keeps empty fields
-# (tabs would collapse them)
-_CAGE_PICKER_SEP=$'\x1f'
 # Displayed (and cached) width of the first-prompt snippet
 _CAGE_PICKER_SNIPPET_LEN=50
 # Width of the picker's NAME column (longer /rename titles are cut with "...")
@@ -59,7 +59,7 @@ _CAGE_PICKER_NAME_LEN=26
 # Usage: _cage_picker_field out_var value [max_len]
 _cage_picker_field() {
     local -n _cpf_out="$1"
-    _cpf_out="${2//[$'\t\n'$_CAGE_PICKER_SEP]/ }"
+    _cpf_out="${2//[$'\t\n'$_CAGE_ROW_SEP]/ }"
     [ -n "$3" ] && _cpf_out="${_cpf_out:0:$3}"
     return 0
 }
@@ -73,22 +73,30 @@ _cage_picker_field() {
 # a fresh cache by itself, while display-only edits to the picker keep it.
 _cage_picker_cache_path() {
     local key
-    key=$({ printf '%s\n%s\n' "$_CAGE_PROMPT_JQ" "$_CAGE_PICKER_SNIPPET_LEN"; declare -f cage_display_name cage_session_context _cage_picker_field _cage_picker_entry; } | cksum)
+    key=$({ printf '%s\n%s\n' "$_CAGE_PROMPT_JQ" "$_CAGE_PICKER_SNIPPET_LEN"; declare -f cage_display_name cage_title_in_file cage_session_context cage_prompt_summary _cage_jq_records _cage_picker_field _cage_picker_entry; } | cksum)
     echo "${CAGE_STORAGE}/picker-cache.${key%% *}.dat"
 }
 
 # Cache-miss computation of one picker row: the session's current display
-# name and its first-prompt snippet, normalized for the cache
+# name and its first-prompt snippet, normalized for the cache. Returns 1 when
+# the prompt scan failed (error printed): the row is shown without a snippet
+# and must not be cached, so the next open scans it again.
 # Usage: _cage_picker_entry out_dn out_ctx cwd uuid
 _cage_picker_entry() {
     local -n _cpe_dn="$1" _cpe_ctx="$2"
-    local _cpe_val
+    local _cpe_val _cpe_rc=0
     _cpe_val=$(cage_display_name "$3" "$4") || _cpe_val=""
     _cage_picker_field _cpe_dn "$_cpe_val"
-    _cpe_val=$(cage_session_context "$3" "$4") || _cpe_val=""
+    _cpe_val=$(cage_session_context "$3" "$4")
+    case $? in
+        0) ;;
+        1) _cpe_val="" ;;
+        *) _cpe_val="" _cpe_rc=1 ;;
+    esac
     # Only the displayed snippet is kept: full pasted prompts would bloat the
     # cache that every open re-reads
     _cage_picker_field _cpe_ctx "$_cpe_val" "$_CAGE_PICKER_SNIPPET_LEN"
+    return $_cpe_rc
 }
 
 # Interactive session picker across all dated dirs, resumable sessions only
@@ -108,7 +116,7 @@ _cage_resume_picker() {
         return 1
     }
     local housekeeping_rc=0
-    cage_prune_unresumable || housekeeping_rc=2
+    cage_tidy_registry || housekeeping_rc=2
     local cache_file
     cache_file=$(_cage_picker_cache_path)
     local meta_rows
@@ -116,7 +124,7 @@ _cage_resume_picker() {
     local r_mf=() r_uuid=() r_cwd=() r_name=() r_profile=() r_start=() r_tr=()
     local hidden=0 mf uuid cwd name profile start_time tr
     if [ -n "$meta_rows" ]; then
-        while IFS=$'\t' read -r mf uuid cwd name profile start_time; do
+        while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd name profile start_time; do
             cage_transcript_path_var tr "$cwd" "$uuid"
             [ -f "$tr" ] || { hidden=$((hidden + 1)); continue; }
             r_mf+=("$mf") r_uuid+=("$uuid") r_cwd+=("$cwd") r_name+=("$name")
@@ -133,7 +141,7 @@ _cage_resume_picker() {
     while IFS=$'\t' read -r m p; do
         mtime_of["$p"]="$m"
     done < <(stat --printf '%Y\t%n\n' -- "${r_tr[@]}")
-    local cu cm cdn cctx sep="$_CAGE_PICKER_SEP"
+    local cu cm cdn cctx sep="$_CAGE_ROW_SEP"
     if [ -f "$cache_file" ]; then
         while IFS="$sep" read -r cu cm cdn cctx; do
             cache_mtime["$cu"]="$cm" cache_dn["$cu"]="$cdn" cache_ctx["$cu"]="$cctx"
@@ -148,10 +156,10 @@ _cage_resume_picker() {
         m="${mtime_of[${r_tr[$i]}]}"
         if [ -n "$m" ] && [ "${cache_mtime[$uuid]}" = "$m" ]; then
             dn="${cache_dn[$uuid]}" ctx="${cache_ctx[$uuid]}"
-        else
-            _cage_picker_entry dn ctx "$cwd" "$uuid"
+            cache_out+=("${uuid}${sep}${m}${sep}${dn}${sep}${ctx}")
+        elif _cage_picker_entry dn ctx "$cwd" "$uuid"; then
+            cache_out+=("${uuid}${sep}${m}${sep}${dn}${sep}${ctx}")
         fi
-        cache_out+=("${uuid}${sep}${m}${sep}${dn}${sep}${ctx}")
 
         day_dir="${r_mf[$i]%/*}"
         day_raw="${day_dir##*/}"
@@ -166,7 +174,7 @@ _cage_resume_picker() {
         # NAME column: the /rename'd title (blank when never renamed, i.e. the
         # title is still cage's launch name); the snippet fills in otherwise
         label="" snippet="$ctx"
-        if [ -n "$dn" ] && [ "$dn" != "$name" ]; then
+        if cage_is_renamed "$dn" "$name"; then
             label="$dn" snippet=""
             [ ${#label} -gt $_CAGE_PICKER_NAME_LEN ] && label="${label:0:_CAGE_PICKER_NAME_LEN-3}..."
         fi
@@ -235,6 +243,10 @@ cage_resume() {
     # Remaining argument is the session
     session="$1"
 
+    # The close menu needs the user settings. Loaded after the options, so
+    # --help still works when the settings file is missing or invalid.
+    cage_load_config || return 1
+
     # Background-only flags are meaningless on an interactive resume — refuse
     # loudly instead of silently resuming the parent conversation
     if [ -z "$prompt" ] && { [ "$fork_mode" = true ] || [ "$md_mode" = true ] || [ "$tail_mode" = true ]; }; then
@@ -273,10 +285,9 @@ cage_resume() {
         # claude exits — possibly on a later day.
         session="$session_name"
 
-        local display="$session_name"
-        local current_name
-        current_name=$(cage_display_name "$orig_cwd" "$uuid") || current_name=""
-        [ -n "$current_name" ] && [ "$current_name" != "$session_name" ] && display="$current_name ($session_name)"
+        local display="$session_name" current_name named
+        cage_named_var current_name named "$orig_cwd" "$uuid" "$session_name"
+        [ "$named" = true ] && display="$current_name ($session_name)"
         cage_print_session_header "$display" "$profile" "$orig_model" "$orig_cwd"
 
         # Re-apply the original session's sandbox (stored in meta) for this resume.
@@ -306,26 +317,33 @@ cage_resume() {
         trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
         (cd "$orig_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} ${orig_tools:+--allowedTools "$orig_tools"} "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}")
         local _exit_code=$?
-        trap - EXIT INT TERM
-        cage_interactive_end "$resume_pid_file"
+        # Shell colors for the close menu; the pid file and the traps stay
+        # until it is done (see cage_interactive_start)
+        cage_interactive_colors_off
         local status_file=$(cage_get_session_file "$session" "status")
         echo "$_exit_code" > "$status_file"
-        # Transcript existence was verified before launch; disappearing during
-        # the session is exceptional — warn, never delete registry files
-        if ! cage_has_conversation "$orig_cwd" "$uuid"; then
-            echo -e "${YELLOW}Warning:${NC} transcript for $session disappeared during the session — registry files kept" >&2
-        fi
         # claude's own failure wins; otherwise a picker failure surfaces here
         local final_rc=$_exit_code
         [ "$final_rc" -eq 0 ] && final_rc=$picker_rc
-        # A session still near-empty after a resume gets the same immediate
-        # cleanup offer as a fresh one
-        cage_offer_near_empty_cleanup "$orig_cwd" "$uuid" "$meta_file" "$session_name"
-        case $? in
-            0) return $final_rc ;;
-            2) return 1 ;;
+        # Same close menu as a fresh session (keep, pin, name, delete). The
+        # transcript was verified before launch; if it disappeared during the
+        # session, the menu would decide on facts it cannot read, so it is
+        # skipped and everything is kept
+        local close_rc
+        if cage_has_conversation "$orig_cwd" "$uuid"; then
+            cage_close_session "$orig_cwd" "$uuid" "$meta_file" "$session_name"
+            close_rc=$?
+        else
+            echo -e "${RED}Error:${NC} transcript for $session disappeared during the session — registry files kept, close menu skipped" >&2
+            close_rc=1
+        fi
+        trap - EXIT INT TERM
+        cage_interactive_end "$resume_pid_file"
+        case $close_rc in
+            0) cage_print_resume_hint "$session_name" ;;
+            10) ;;
+            *) return 1 ;;
         esac
-        cage_print_resume_hint "$session_name"
         return $final_rc
     fi
 
@@ -442,21 +460,9 @@ cage_resume() {
     # Record the job on the parent row AFTER the claim succeeds (a losing
     # concurrent invocation must not relabel the winner's job): cage status
     # shows the latest task, and the meta mtime bump keeps the row at the top
-    # of the mtime-sorted list. The temp file lives in the meta's own dir so
-    # the mv is an atomic same-filesystem rename.
+    # of the mtime-sorted list.
     if [ "$fork_mode" = false ]; then
-        local tmp_meta
-        tmp_meta=$(mktemp "${meta_file}.XXXXXX") || { rm -f "$pid_file"; return 1; }
-        jq --arg task "$prompt" '.task = $task' "$meta_file" > "$tmp_meta" || {
-            rm -f "$tmp_meta" "$pid_file"
-            echo -e "${RED}Error:${NC} cannot update metadata: $meta_file" >&2
-            return 1
-        }
-        mv "$tmp_meta" "$meta_file" || {
-            rm -f "$tmp_meta" "$pid_file"
-            echo -e "${RED}Error:${NC} cannot replace metadata: $meta_file" >&2
-            return 1
-        }
+        cage_meta_set "$meta_file" task "$prompt" || { rm -f "$pid_file"; return 1; }
     fi
 
     # Create wrapper script (job_session is unique here: the pid-file claim

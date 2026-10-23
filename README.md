@@ -77,13 +77,61 @@ line saying how many. Rows with a background log or result are kept so
 never touched, nor are rows whose `~/.claude/projects/<slug>` dir does not
 exist at all (that points at a mis-computed slug, not a purged transcript).
 The confirmed `cage clean --expired` is deliberately broader
-and also removes today's and log/result rows (RUNNING rows are still
-skipped).
-Near-empty sessions (no task, no result, not renamed, at most one
-greeting-sized prompt) are hidden by default — a dim footer counts them and
-`--all` reveals them. Closing such a session interactively offers on-the-spot
-cleanup (Enter = clean). A single substantial question never counts as
-near-empty, and a `/rename`'d session is always kept.
+and also removes today's and log/result rows. No `cage clean` mode touches
+RUNNING or pinned rows (a pinned row is deleted from its close menu; one
+that lost both its transcript and its archive copy counts as unpinned). A
+removed row takes the archive copy an expired pin left with it.
+Near-empty sessions (no task, no result, not renamed, at most
+`short_max_prompts` prompts with a first prompt of at most
+`short_prompt_max_chars` characters) are hidden by default — a dim footer
+counts them and `--all` reveals them. A single substantial question never
+counts as near-empty, and a `/rename`'d session is always kept.
+
+### Closing a session
+
+When an interactive `cage new` ends and nothing was typed or pasted into the
+session and Claude never answered (built-in commands such as `/model` alone
+do not count; a skill or custom command Claude answered does), the session
+is deleted without asking. Any other session, and every interactive
+`cage resume` whose transcript still exists (one that vanished during the
+session is kept, with an error), gets the close menu:
+
+- **Keep**: normal retention (Claude Code's `cleanupPeriodDays`); an already
+  pinned session stays pinned and its archive is refreshed.
+- **Keep long**: pin it for `pin_days`. cage archives the transcript in
+  `~/.local/state/cage/archive/` (refreshed at every close) and restores it
+  when Claude Code's retention sweep deleted the original — on the
+  `cage status` listing, the picker, or `cage resume <session>`. Background
+  `-p` jobs on a pinned session reach the archive at its next interactive
+  close.
+- **Name and keep** / **Name and keep long**: write the same title record
+  `/rename` writes (the name shows in the picker and `cage status` and works
+  with `cage resume <name>`), then keep or pin. Naming takes milliseconds and
+  finishes before cage exits, so closing the terminal right after is safe.
+  A name that parses as a session code, handle or UUID is refused (it could
+  never be resumed by); a name another session already has is accepted, and
+  `cage resume <name>` then lists both handles.
+- **Delete**: the registry row, Claude's transcript and its subagent dir, and
+  any archive copy — the session is gone everywhere, `claude --resume`
+  included.
+
+Esc keeps the session. Without a terminal on stdin nothing is asked.
+
+### Settings
+
+`~/.config/cage/config.json` (tracked in the dotfiles at
+`dotfiles/config/cage/config.json`, linked by `config-sync`). Every key is
+required and no other is allowed; a missing file, a missing or unknown key
+or an invalid value stops `cage new`, `resume`, `status` and `clean` with an
+error naming the fix.
+
+| Key | Values | Meaning |
+|-----|--------|---------|
+| `close_ask` | `always` / `unless-named` / `never` | When the close menu appears (`never` keeps every session that would get the menu; an empty `cage new` session is still removed) |
+| `close_default` | `keep` / `delete` / `auto` | What Enter picks; `auto` = Delete for near-empty sessions, Keep otherwise (a pinned session always defaults to Keep) |
+| `pin_days` | whole number ≥ 1 | How long Keep long keeps a session |
+| `short_max_prompts` | whole number ≥ 1 | Near-empty: at most this many prompts |
+| `short_prompt_max_chars` | whole number ≥ 1 | Near-empty: first prompt at most this long |
 
 ### Profile management
 
@@ -202,6 +250,12 @@ separate concern and unchanged):
 - `cage_N.result.json` - Structured result
 - `cage_N.sysprompt` - Transient system-prompt hand-off for `-p` resume jobs
   (deleted by the job wrapper when the run finishes)
+
+Next to the dated dirs, `~/.local/state/cage/archive/<uuid>.jsonl` (+
+`archive/<uuid>/`) holds the transcript copy of a pinned session
+(`keep_until` in its meta), restored after Claude Code's sweep. It is
+deleted by the close menu's Delete, and with its row once the pin has
+expired and the row is pruned or cleaned.
 
 Conversation transcripts are Claude Code's own, under
 `~/.claude/projects/<cwd-slug>/<uuid>.jsonl`, retained per your

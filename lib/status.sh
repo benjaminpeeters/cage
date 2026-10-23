@@ -18,7 +18,7 @@ _cage_status_single() {
     local status_file=$(cage_get_session_file "$session" "status")
     local result_file=$(cage_get_session_file "$session" "result.json")
 
-    local uuid name cwd profile task start_time model tools
+    local uuid name cwd profile task start_time model tools keep_until
     eval "$(jq -r '
         "uuid=" + (.uuid // "" | @sh) + " " +
         "name=" + (.name // "" | @sh) + " " +
@@ -27,7 +27,8 @@ _cage_status_single() {
         "task=" + (.task // "" | @sh) + " " +
         "start_time=" + (.start_time // "" | @sh) + " " +
         "model=" + (.model // "" | @sh) + " " +
-        "tools=" + (.tools // "" | @sh)
+        "tools=" + (.tools // "" | @sh) + " " +
+        "keep_until=" + (.keep_until // "" | @sh)
     ' "$meta_file" 2>/dev/null)"
 
     # Determine status
@@ -72,11 +73,11 @@ _cage_status_single() {
     local session_id=$(cage_relative_code "$day_raw" "$session_num")
 
     # Current display name (reflects in-session /rename)
-    local display_name
-    display_name=$(cage_display_name "$cwd" "$uuid") || display_name="$name"
+    local display_name named
+    cage_named_var display_name named "$cwd" "$uuid" "$name"
 
     echo -e "${BOLD}Session: ${GREEN}${session_id}${NC} ${DIM}(${name})${NC}"
-    [ "$display_name" != "$name" ] && echo -e "  ${DIM}Name:${NC}     ${BOLD}${display_name}${NC}"
+    [ "$named" = true ] && echo -e "  ${DIM}Name:${NC}     ${BOLD}${display_name}${NC}"
     echo -e "  ${DIM}Status:${NC}   $status"
     [ -n "$duration" ] && echo -e "  ${DIM}Duration:${NC} ${YELLOW}$duration${NC}"
     [ -n "$pid" ] && [ "$running" = true ] && echo -e "  ${DIM}PID:${NC}      ${YELLOW}$pid${NC}"
@@ -85,6 +86,13 @@ _cage_status_single() {
     [ -n "$model" ] && echo -e "  ${DIM}Model:${NC}    $model"
     [ -n "$tools" ] && echo -e "  ${DIM}Tools:${NC}    $tools"
     [ -n "$start_time" ] && echo -e "  ${DIM}Started:${NC}  $start_time"
+    if [ -n "$keep_until" ]; then
+        if cage_pin_active "$keep_until"; then
+            echo -e "  ${DIM}Pinned:${NC}   until ${YELLOW}${keep_until}${NC} (transcript archived in ${CAGE_ARCHIVE})"
+        else
+            echo -e "  ${DIM}Pinned:${NC}   expired ${keep_until}"
+        fi
+    fi
     if [ -n "$task" ]; then
         echo -e "  ${DIM}Task:${NC}     ${task:0:120}"
     else
@@ -132,16 +140,18 @@ Arguments:
 Options:
   --profile NAME   List only sessions launched with this profile
   -a, --all        Also list near-empty sessions (no task, no result, not
-                   renamed, at most one greeting-sized prompt) — hidden by
-                   default as test debris
+                   renamed, at most short_max_prompts prompts, the first at
+                   most short_prompt_max_chars characters; see
+                   ~/.config/cage/config.json) — hidden by default as debris
 
 Rows show identifying context: the /rename'd name when set, else the
 session's task or the first prompt typed into it.
 
-The listing first prunes rows that can never be resumed (no transcript
-left); today's, RUNNING and background log/result rows are kept. A failed
-prune is reported and makes the command exit non-zero, but the sessions
-are still listed.
+The listing first restores the transcripts of pinned sessions that Claude
+Code's retention deleted, and prunes rows that can never be resumed (no
+transcript left); today's, RUNNING and background log/result rows are kept.
+A failure there is reported and makes the command exit non-zero, but the
+sessions are still listed.
 EOF
                 return 0
                 ;;
@@ -167,6 +177,10 @@ EOF
         esac
     done
 
+    # The listing's near-empty filter needs the user settings. Loaded after
+    # the options, so --help still works when the settings file is invalid.
+    cage_load_config || return 1
+
     local arg="$1"
 
     # Enable nullglob for this function (restore on return)
@@ -177,11 +191,8 @@ EOF
     # If argument looks like a session identifier, show single session
     if [ -n "$arg" ]; then
         local resolved=""
-        # s<n>-<n> or cage-YYYY-MM-DD-N or UUID ([sS]/[-_] also match the
-        # underscore spellings stored in older meta .name fields)
-        if [[ $arg =~ ^[sS]-?[0-9]+[-_][0-9]+$ ]] || \
-           [[ $arg =~ ^cage[-_][0-9]{4}-[0-9]{2}-[0-9]{2}[-_][0-9]+$ ]] || \
-           [[ $arg =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        # s<n>-<n> or cage-YYYY-MM-DD-N or UUID
+        if cage_is_session_ref "$arg"; then
             resolved="$arg"
         # Pure number: could be max_logs or a PID (PIDs are > 100)
         elif [[ $arg =~ ^[0-9]+$ ]] && [ "$arg" -gt 100 ]; then
@@ -221,7 +232,7 @@ _cage_status_list() {
     # read-only registry inside a sandbox) keeps its error on stderr and the
     # non-zero exit, but the sessions are still listed
     local prune_rc=0
-    cage_prune_unresumable || prune_rc=1
+    cage_tidy_registry || prune_rc=1
 
     # Scan all meta.json files sorted by modification time (newest first)
     local meta_files=()
@@ -266,28 +277,33 @@ _cage_status_list() {
         local status_file="${day_dir}/cage_${session_num}.status"
 
         cage_resolve_status "$pid_file" "$status_file" "$log_file"
-        # Identifying context: the task, else the first prompt typed. Scanned
-        # ONCE here and reused by the near-empty decision below.
-        local ctx="$task" first_prompt=""
+        # Identifying context: the task, else the first prompt typed. One scan
+        # gives the first prompt and the prompt count, which the near-empty
+        # decision reuses (it looks up the /rename'd name only if needed).
+        local ctx="$task" first_prompt="" prompts="" scan_ok=true summary
         if [ -z "$ctx" ]; then
-            first_prompt=$(cage_session_context "$cwd" "$uuid") || first_prompt=""
-            ctx="$first_prompt"
+            if summary=$(cage_prompt_summary "$cwd" "$uuid" $(( CFG_SHORT_MAX_PROMPTS + 1 ))); then
+                IFS=$'\t' read -r prompts first_prompt <<< "$summary"
+                ctx="$first_prompt"
+            else
+                scan_ok=false
+            fi
         fi
         # Near-empty rows (test debris) are hidden by default; RUNNING ones
-        # stay visible — a freshly opened session has no prompts yet
-        if [ "$show_all" = false ] && [ "$_cage_running" = false ] \
-            && cage_is_near_empty "$cwd" "$uuid" "$meta_file" "$first_prompt"; then
+        # stay visible — a freshly opened session has no prompts yet — and so
+        # does a row whose scan failed (error printed). A tasked row is never
+        # near-empty.
+        if [ "$show_all" = false ] && [ "$_cage_running" = false ] && [ "$scan_ok" = true ] && [ -z "$task" ] \
+            && cage_is_near_empty "$cwd" "$uuid" "$meta_file" "$first_prompt" "" "$prompts"; then
             hidden=$((hidden + 1))
             continue
         fi
         if [ "$_cage_running" = true ] || [ $count -lt $max_logs ]; then
-            # Display name computed only for rows actually shown (one
-            # transcript scan per row); appended when it differs from the
-            # meta name, i.e. the session was /rename'd
-            local display_name named=""
-            display_name=$(cage_display_name "$cwd" "$uuid") || display_name="$name"
-            [ "$display_name" != "$name" ] && named="  ${BOLD}${display_name}${NC}"
-            local line1="• ${GREEN}${session_id}${NC} (${BLUE}${time}${NC}) - ${_cage_status}${named}"
+            # The /rename'd name, read only for rows actually shown
+            local display_name named named_label=""
+            cage_named_var display_name named "$cwd" "$uuid" "$name"
+            [ "$named" = true ] && named_label="  ${BOLD}${display_name}${NC}"
+            local line1="• ${GREEN}${session_id}${NC} (${BLUE}${time}${NC}) - ${_cage_status}${named_label}"
             local line2="  ${DIM}UUID:${NC} ${CYAN}${uuid}${NC}  ${DIM}Profile:${NC} ${PURPLE}${profile}${NC}"
             local entry="$line1"$'\n'"$line2"
             [ -n "$ctx" ] && entry+=$'\n'"  ${DIM}${ctx:0:80}${NC}"

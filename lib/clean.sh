@@ -14,8 +14,9 @@ Modes (bare `cage clean` opens a gum menu):
                       Claude Code's cleanupPeriodDays retention, so they can
                       never be resumed again
   --empty             Near-empty sessions: no task, no result, not renamed,
-                      at most one greeting-sized prompt (today's sessions and
-                      RUNNING ones are kept)
+                      at most short_max_prompts prompts, the first at most
+                      short_prompt_max_chars characters (see
+                      ~/.config/cage/config.json; today's sessions are kept)
   --interactive       Pick the sessions to delete from a gum multi-select
   --older-than DAYS   Everything older than DAYS
 
@@ -23,10 +24,14 @@ Options:
   --dry-run           Show what would be removed without touching anything
   -h, --help          Show this help
 
-Only cage's registry (~/.local/state/cage) is touched — Claude-side
-transcripts under ~/.claude/projects are never deleted here. Every choice is
-echoed back for the record, every mode ends with an itemized warning and a
-gum confirmation, and stale pid files in the remaining rows are swept
+RUNNING sessions and pinned ones (Keep long, pin not expired) are never
+removed; delete a pinned session from its close menu. A pinned session that
+lost both its transcript and its archive copy counts as unpinned. Only
+cage's own storage (~/.local/state/cage: registry rows and the archive copy
+an expired pin left) is touched — Claude-side transcripts under
+~/.claude/projects are never deleted here. Every choice is echoed back for
+the record, every mode ends with an itemized warning and a gum
+confirmation, and stale pid files in the remaining rows are swept
 afterwards.
 EOF
 }
@@ -67,6 +72,10 @@ cage_clean() {
         esac
     done
 
+    # --empty needs the near-empty thresholds from the user settings. Loaded
+    # after the options, so --help still works when the file is invalid.
+    cage_load_config || return 1
+
     if [ -z "$mode" ]; then
         command -v gum >/dev/null 2>&1 || {
             echo -e "${RED}Error:${NC} gum is required for the mode menu (or pass --expired/--empty/--interactive/--older-than)" >&2
@@ -75,7 +84,7 @@ cage_clean() {
         local choice
         choice=$(gum choose --header "cage clean — what to remove?" \
             "expired      rows whose Claude transcript is gone (unresumable)" \
-            "near-empty   no task/result/rename, one greeting-sized prompt at most" \
+            "near-empty   no task/result/rename, few prompts, short first one (cage settings)" \
             "pick         select sessions to delete" \
             "by-age       everything older than N days") || {
             echo "Aborted — nothing removed."
@@ -108,22 +117,33 @@ cage_clean() {
     # One batched jq for all rows (a per-row jq trio makes large registries
     # feel hung, especially before the pick selector appears)
     local meta_rows
-    meta_rows=$(cage_meta_rows '.uuid // "", .cwd // "", .task // ""') || return 1
+    meta_rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // "", .task // ""') || return 1
     if [ -z "$meta_rows" ]; then
         echo "Registry is empty."
         return 0
     fi
 
-    # Collect target rows per mode; RUNNING rows are never touched
-    local targets=() pick_rows=() kept_running=0 today
+    # Collect target rows per mode; RUNNING and pinned rows are never touched
+    # (a pinned row without transcript is restored by cage status or the
+    # picker, never expired here). A pinned row with neither a transcript nor
+    # an archive copy can never be restored, so it is treated as unpinned.
+    local targets=() pick_rows=() kept_running=0 kept_pinned=0 today
+    local -A uuid_of mf_of_handle
     today=$(date +%Y-%m-%d)
-    local mf uuid cwd task
-    while IFS=$'\t' read -r mf uuid cwd task; do
+    local mf uuid cwd keep_until task handle copy
+    while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd keep_until task; do
         [ -n "$mf" ] || continue
         if cage_meta_running "$mf"; then
             kept_running=$((kept_running + 1))
             continue
         fi
+        cage_archive_path_var copy "$uuid"
+        if cage_pin_active "$keep_until" \
+            && { cage_has_conversation "$cwd" "$uuid" || [ -f "$copy" ]; }; then
+            kept_pinned=$((kept_pinned + 1))
+            continue
+        fi
+        uuid_of["$mf"]="$uuid"
         case "$mode" in
             expired)
                 cage_has_conversation "$cwd" "$uuid" || targets+=("$mf")
@@ -140,7 +160,9 @@ cage_clean() {
             pick)
                 local ctx="$task"
                 [ -z "$ctx" ] && { ctx=$(cage_session_context "$cwd" "$uuid") || ctx=""; }
-                pick_rows+=("$(printf '%-21s %s' "$(cage_handle_from_meta "$mf")" "${ctx:0:60}")")
+                handle=$(cage_handle_from_meta "$mf")
+                mf_of_handle["$handle"]="$mf"
+                pick_rows+=("$(printf '%-21s %s' "$handle" "${ctx:0:60}")")
                 targets+=("$mf")
                 ;;
         esac
@@ -162,16 +184,22 @@ cage_clean() {
             return 1
         }
         targets=()
-        local line handle
+        local line
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             handle="${line%% *}"
-            targets+=("$(cage_get_session_file "$handle" "meta.json")")
+            mf="${mf_of_handle[$handle]}"
+            [ -n "$mf" ] || {
+                echo -e "${RED}Error:${NC} gum returned a row that was not offered: $line" >&2
+                return 1
+            }
+            targets+=("$mf")
         done <<< "$picked"
         echo -e "${DIM}Selected:${NC} ${#targets[@]} session(s)"
     fi
 
     [ "$kept_running" -gt 0 ] && echo -e "${YELLOW}Note:${NC} ${kept_running} RUNNING session(s) excluded" >&2
+    [ "$kept_pinned" -gt 0 ] && echo -e "${YELLOW}Note:${NC} ${kept_pinned} pinned session(s) excluded (delete one from its close menu)" >&2
     if [ ${#targets[@]} -eq 0 ]; then
         echo "Nothing to clean for this mode."
         return 0
@@ -182,7 +210,7 @@ cage_clean() {
     for mf in "${targets[@]}"; do
         _cage_clean_describe "$mf"
     done
-    echo -e "${YELLOW}Warning:${NC} this permanently deletes these registry records (meta, log, result, exit code)."
+    echo -e "${YELLOW}Warning:${NC} this permanently deletes these registry records (meta, log, result, exit code) and any archive copy an expired pin left."
     echo -e "${DIM}Claude-side transcripts under ~/.claude/projects are NOT touched.${NC}"
 
     if [ "$dry_run" = true ]; then
@@ -201,7 +229,7 @@ cage_clean() {
 
     local failed=0
     for mf in "${targets[@]}"; do
-        cage_remove_session_files "$mf" || failed=$((failed + 1))
+        cage_remove_session_row "$mf" "${uuid_of[$mf]}" || failed=$((failed + 1))
     done
     echo -e "${GREEN}✓${NC} Removed $(( ${#targets[@]} - failed )) session record(s)."
 
