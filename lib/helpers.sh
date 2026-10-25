@@ -662,13 +662,22 @@ cage_remove_session_row() {
 }
 
 # Delete a session everywhere: Claude's transcript and its subagent dir, the
-# pinned archive copy, and the registry row. Irreversible.
+# transcripts of its previous ids (older copies Claude Code left when it
+# moved the conversation, see cage_follow_session), the pinned archive copy,
+# and the registry row. Irreversible.
 # Usage: cage_delete_session "$meta_file" "$cwd" "$uuid" || return 1
 cage_delete_session() {
-    local meta_file="$1" cwd="$2" uuid="$3" transcript
+    local meta_file="$1" cwd="$2" uuid="$3" transcript previous id
     cage_require_uuid "$uuid" || return 1
-    cage_transcript_path_var transcript "$cwd" "$uuid"
-    rm -rf -- "$transcript" "${transcript%.jsonl}" || return 1
+    previous=$(jq -r '.previous_uuids // [] | .[]' "$meta_file") || {
+        echo -e "${RED}Error:${NC} cannot read previous ids from $meta_file" >&2
+        return 1
+    }
+    for id in "$uuid" $previous; do
+        cage_require_uuid "$id" || return 1
+        cage_transcript_path_var transcript "$cwd" "$id"
+        rm -rf -- "$transcript" "${transcript%.jsonl}" || return 1
+    done
     cage_remove_session_row "$meta_file" "$uuid"
 }
 
@@ -723,19 +732,104 @@ cage_restore_transcript() {
     return 0
 }
 
-# Set one string field of a session meta in place. The temp file lives in
-# the meta's own dir, so the mv is an atomic same-filesystem rename (a reader
-# never sees half a file).
-# Usage: cage_meta_set "$meta_file" key value || return 1
-cage_meta_set() {
-    local tmp
-    tmp=$(mktemp "$1.XXXXXX") || return 1
-    if jq --arg k "$2" --arg v "$3" '.[$k] = $v' "$1" > "$tmp" && mv -- "$tmp" "$1"; then
+# Rewrite a session meta in place with a jq filter (and its jq arguments).
+# The temp file lives in the meta's own dir, so the mv is an atomic
+# same-filesystem rename (a reader never sees half a file).
+# Usage: cage_meta_jq "$meta_file" [jq args...] "$filter" || return 1
+cage_meta_jq() {
+    local meta="$1" tmp
+    shift
+    tmp=$(mktemp "$meta.XXXXXX") || return 1
+    if jq "$@" "$meta" > "$tmp" && mv -- "$tmp" "$meta"; then
         return 0
     fi
     rm -f "$tmp"
-    echo -e "${RED}Error:${NC} cannot set $2 in $1 (error above)" >&2
+    echo -e "${RED}Error:${NC} cannot update $meta (error above)" >&2
     return 1
+}
+
+# Set one string field of a session meta in place
+# Usage: cage_meta_set "$meta_file" key value || return 1
+cage_meta_set() {
+    cage_meta_jq "$1" --arg k "$2" --arg v "$3" '.[$k] = $v'
+}
+
+# The record uuids of a transcript, in order, at most <limit>
+# Usage: ids=$(_cage_record_ids "$transcript" "$limit") || return 1
+_cage_record_ids() {
+    jq -nRr --argjson n "$2" 'limit($n; inputs | fromjson? | objects | select(.uuid) | .uuid)' "$1"
+}
+
+# Claude Code can move a running conversation to a new session id: it writes
+# a new transcript in the same project dir holding every record of the old
+# one (same record uuids, rewritten under the new session id) and continues
+# there. Seen on a mid-session auto-update (2.1.308 -> 2.1.309, cage issue
+# #3); /branch does the same. Prints the uuid of the transcript written since
+# <since_epoch> that continues <uuid>, or nothing. A candidate counts only
+# when its records start with exactly all of the old transcript's records
+# and go on past them, so another session in the same directory, or a mere
+# copy, never matches.
+# Usage: next=$(cage_continuation_of cwd uuid since_epoch) || return 1
+cage_continuation_of() {
+    local transcript cand old_ids n first
+    cage_transcript_path_var transcript "$1" "$2"
+    [ -f "$transcript" ] || return 0
+    # Oldest first: after two switches both later transcripts continue this
+    # one, and taking the nearest keeps the chain hop by hop, so every
+    # intermediate id is recorded (and later deleted with the session)
+    local -a cands=()
+    mapfile -t cands < <(find "${transcript%/*}" -maxdepth 1 -name '*.jsonl' ! -name "$2.jsonl" \
+        -newermt "@$3" -printf '%T@\t%p\n' | sort -n | cut -f2)
+    [ ${#cands[@]} -gt 0 ] || return 0
+    local fail="cannot read the records of a transcript in ${transcript%/*} (jq error above)"
+    first=$(_cage_record_ids "$transcript" 1) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
+    [ -n "$first" ] || return 0
+    local cand_ids
+    for cand in "${cands[@]}"; do
+        # The first record settles nearly every candidate (other sessions
+        # sharing the directory); only a match pays for the full read
+        cand_ids=$(_cage_record_ids "$cand" 1) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
+        [ "$cand_ids" = "$first" ] || continue
+        if [ -z "$old_ids" ]; then
+            old_ids=$(_cage_record_ids "$transcript" 1000000000) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
+            n=$(wc -l <<< "$old_ids")
+        fi
+        cand_ids=$(_cage_record_ids "$cand" $(( n + 1 ))) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
+        [ "$(wc -l <<< "$cand_ids")" -gt "$n" ] || continue
+        [ "${cand_ids%$'\n'*}" = "$old_ids" ] || continue
+        cand="${cand##*/}"
+        printf '%s\n' "${cand%.jsonl}"
+        return 0
+    done
+    return 0
+}
+
+# Follow a session to the transcript Claude Code continued it in (see
+# cage_continuation_of), hop by hop: the meta gets the new uuid and keeps the
+# old ones in previous_uuids, and a pin's archive copy moves along so the
+# pin stays continuous. Prints the final uuid (the same one when nothing
+# moved); one notice per hop goes to stderr.
+# Usage: uuid=$(cage_follow_session "$meta_file" "$cwd" "$uuid" "$since_epoch") || return 1
+cage_follow_session() {
+    local meta_file="$1" cwd="$2" uuid="$3" since="$4" next old_copy new_copy
+    while :; do
+        next=$(cage_continuation_of "$cwd" "$uuid" "$since") || return 1
+        [ -n "$next" ] || break
+        cage_require_uuid "$next" || return 1
+        cage_meta_jq "$meta_file" --arg n "$next" \
+            '.previous_uuids = ((.previous_uuids // []) + [.uuid]) | .uuid = $n' || return 1
+        cage_archive_path_var old_copy "$uuid"
+        cage_archive_path_var new_copy "$next"
+        if [ -f "$old_copy" ]; then
+            mv -- "$old_copy" "$new_copy" || return 1
+            if [ -d "${old_copy%.jsonl}" ]; then
+                rm -rf -- "${new_copy%.jsonl}" && mv -- "${old_copy%.jsonl}" "${new_copy%.jsonl}" || return 1
+            fi
+        fi
+        echo -e "${DIM}Claude Code continued this conversation as session ${next}; cage follows it (previous id ${uuid} kept in the meta).${NC}" >&2
+        uuid="$next"
+    done
+    printf '%s\n' "$uuid"
 }
 
 # Pin a session ("Keep long"): keep_until = today + pin_days (cage settings),

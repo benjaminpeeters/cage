@@ -219,6 +219,9 @@ cage_new() {
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
+        # Transcripts written from here on may continue this conversation
+        # (see cage_follow_session); a second earlier covers clock granularity
+        local launch_epoch=$(( $(date +%s) - 1 ))
         (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}" "${task_args[@]}")
         local _exit_code=$?
         # Shell colors for the close menu; the pid file and the traps stay
@@ -230,9 +233,17 @@ cage_new() {
         # existence stopped being the signal: claude writes the file at launch
         # for the --name title record even when the session is closed
         # immediately.
-        local input_rc close_rc
-        cage_has_user_input "$work_dir" "$uuid"
-        input_rc=$?
+        # Claude Code may have moved the conversation to a new session id
+        # (cage_follow_session); every step below must act on the new one. A
+        # failed follow (error printed) counts as a failed check: keep all.
+        local input_rc close_rc followed
+        if followed=$(cage_follow_session "$meta_file" "$work_dir" "$uuid" "$launch_epoch"); then
+            uuid="$followed"
+            cage_has_user_input "$work_dir" "$uuid"
+            input_rc=$?
+        else
+            input_rc=2
+        fi
         if [ "$input_rc" -eq 0 ]; then
             cage_close_session "$work_dir" "$uuid" "$meta_file" "$session_name"
             close_rc=$?

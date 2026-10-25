@@ -117,6 +117,16 @@ session is kept, with an error), gets the close menu:
 
 Esc keeps the session. Without a terminal on stdin nothing is asked.
 
+Claude Code sometimes moves a running conversation to a new session id: it
+copies the transcript under the new id and continues there (seen on a
+mid-session auto-update; `/branch` does the same). Before the close menu,
+cage looks for a transcript written during the session that starts with
+exactly all of this session's records and goes on past them, and follows
+it: the row gets the new id (the old ones are kept as `previous_uuids` in
+its meta, and Delete removes their transcripts too), and a pin's archive
+copy moves along. A `/clear` starts a fresh conversation without copying
+the old one, so it is not followed. Background `-p` jobs are not followed.
+
 ### Settings
 
 `~/.config/cage/config.json` (tracked in the dotfiles at

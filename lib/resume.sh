@@ -315,6 +315,9 @@ cage_resume() {
         cage_interactive_start "$resume_pid_file"
         trap 'cage_interactive_end "$resume_pid_file"' EXIT
         trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
+        # Transcripts written from here on may continue this conversation
+        # (see cage_follow_session); a second earlier covers clock granularity
+        local launch_epoch=$(( $(date +%s) - 1 ))
         (cd "$orig_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} ${orig_tools:+--allowedTools "$orig_tools"} "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}")
         local _exit_code=$?
         # Shell colors for the close menu; the pid file and the traps stay
@@ -325,12 +328,16 @@ cage_resume() {
         # claude's own failure wins; otherwise a picker failure surfaces here
         local final_rc=$_exit_code
         [ "$final_rc" -eq 0 ] && final_rc=$picker_rc
-        # Same close menu as a fresh session (keep, pin, name, delete). The
+        # Same close menu as a fresh session (keep, pin, name, delete), on the
+        # session id Claude Code ended with (cage_follow_session). The
         # transcript was verified before launch; if it disappeared during the
-        # session, the menu would decide on facts it cannot read, so it is
-        # skipped and everything is kept
-        local close_rc
-        if cage_has_conversation "$orig_cwd" "$uuid"; then
+        # session, or the follow failed (error printed), the menu would decide
+        # on facts it cannot read, so it is skipped and everything is kept
+        local close_rc followed
+        if ! followed=$(cage_follow_session "$meta_file" "$orig_cwd" "$uuid" "$launch_epoch"); then
+            echo -e "${RED}Error:${NC} cannot tell whether Claude Code moved $session to a new session id — registry files kept, close menu skipped" >&2
+            close_rc=1
+        elif uuid="$followed"; cage_has_conversation "$orig_cwd" "$uuid"; then
             cage_close_session "$orig_cwd" "$uuid" "$meta_file" "$session_name"
             close_rc=$?
         else
