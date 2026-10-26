@@ -68,35 +68,75 @@ _cage_picker_field() {
 # display name, first-prompt snippet. A row is reused only while its
 # transcript's mtime is unchanged, so a /rename or a new turn anywhere shows
 # on the next open. The file name carries a checksum of the code and values
-# that shape a cached value: _CAGE_PROMPT_JQ, _CAGE_PICKER_SNIPPET_LEN,
-# _cage_picker_entry and the functions it calls; editing any of them starts
-# a fresh cache by itself, while display-only edits to the picker keep it.
+# that shape a cached value: _CAGE_PROMPT_JQ, _CAGE_GREP_H_SPLIT_JQ,
+# _CAGE_PICKER_SNIPPET_LEN, _cage_picker_entries and the functions it calls;
+# editing any of them starts a fresh cache by itself, while display-only
+# edits to the picker keep it.
 _cage_picker_cache_path() {
     local key
-    key=$({ printf '%s\n%s\n' "$_CAGE_PROMPT_JQ" "$_CAGE_PICKER_SNIPPET_LEN"; declare -f cage_display_name cage_title_in_file cage_session_context cage_prompt_summary _cage_jq_records _cage_picker_field _cage_picker_entry; } | cksum)
+    key=$({ printf '%s\n%s\n%s\n' "$_CAGE_PROMPT_JQ" "$_CAGE_GREP_H_SPLIT_JQ" "$_CAGE_PICKER_SNIPPET_LEN"; declare -f cage_titles_of cage_first_prompts_of cage_prompt_summary_of_file _cage_jq_records _cage_grep_jq _cage_picker_field _cage_picker_entries; } | cksum)
     echo "${CAGE_STORAGE}/picker-cache.${key%% *}.dat"
 }
 
-# Cache-miss computation of one picker row: the session's current display
-# name and its first-prompt snippet, normalized for the cache. Returns 1 when
-# the prompt scan failed (error printed): the row is shown without a snippet
-# and must not be cached, so the next open scans it again.
-# Usage: _cage_picker_entry out_dn out_ctx cwd uuid
-_cage_picker_entry() {
-    local -n _cpe_dn="$1" _cpe_ctx="$2"
-    local _cpe_val _cpe_rc=0
-    _cpe_val=$(cage_display_name "$3" "$4") || _cpe_val=""
-    _cage_picker_field _cpe_dn "$_cpe_val"
-    _cpe_val=$(cage_session_context "$3" "$4")
-    case $? in
-        0) ;;
-        1) _cpe_val="" ;;
-        *) _cpe_val="" _cpe_rc=1 ;;
-    esac
-    # Only the displayed snippet is kept: full pasted prompts would bloat the
-    # cache that every open re-reads
-    _cage_picker_field _cpe_ctx "$_cpe_val" "$_CAGE_PICKER_SNIPPET_LEN"
-    return $_cpe_rc
+# Cache-miss computation for the picker rows the cache cannot serve: each
+# transcript's current display name and first-prompt snippet, normalized for
+# the cache, in one batch (cage_titles_of, cage_first_prompts_of); only a
+# transcript with no prompt in its first lines gets the exact per-file scan
+# (cage_prompt_summary_of_file). Fills the three named maps, keyed by
+# transcript path. A transcript whose scan failed (error printed) goes into
+# the failed map: it is shown without its snippet (and also without its name
+# when it was unreadable or the whole batch failed) and is not cached, so
+# the next open scans it again.
+# Usage: _cage_picker_entries dn_map ctx_map failed_map transcript...
+_cage_picker_entries() {
+    local -n _cpe_dn="$1" _cpe_ctx="$2" _cpe_failed="$3"
+    shift 3
+    local titles prompts f v norm
+    # An unreadable transcript fails on its own: in the batch, its grep
+    # error would fail every other row too
+    local -a readable=()
+    for f; do
+        if [ -r "$f" ]; then
+            readable+=("$f")
+        else
+            echo -e "${RED}Error:${NC} cannot read $f" >&2
+            _cpe_failed["$f"]=1
+        fi
+    done
+    set -- "${readable[@]}"
+    [ $# -gt 0 ] || return 0
+    if ! titles=$(cage_titles_of "$@") || ! prompts=$(cage_first_prompts_of "$@"); then
+        for f; do _cpe_failed["$f"]=1; done
+        return 0
+    fi
+    for f; do _cpe_dn["$f"]="" _cpe_ctx["$f"]=""; done
+    if [ -n "$titles" ]; then
+        while IFS=$'\t' read -r f v; do
+            _cage_picker_field norm "$v"
+            _cpe_dn["$f"]="$norm"
+        done <<< "$titles"
+    fi
+    local -A found=()
+    if [ -n "$prompts" ]; then
+        while IFS=$'\t' read -r f v; do
+            found["$f"]=1
+            # Only the displayed snippet is kept: full pasted prompts would
+            # bloat the cache that every open re-reads
+            _cage_picker_field norm "$v" "$_CAGE_PICKER_SNIPPET_LEN"
+            _cpe_ctx["$f"]="$norm"
+        done <<< "$prompts"
+    fi
+    local summary count
+    for f; do
+        [ -n "${found[$f]}" ] && continue
+        summary=$(cage_prompt_summary_of_file "$f" 1) || {
+            _cpe_failed["$f"]=1
+            continue
+        }
+        IFS=$'\t' read -r count v <<< "$summary"
+        _cage_picker_field norm "$v" "$_CAGE_PICKER_SNIPPET_LEN"
+        _cpe_ctx["$f"]="$norm"
+    done
 }
 
 # Interactive session picker across all dated dirs, resumable sessions only
@@ -108,26 +148,35 @@ _cage_picker_entry() {
 # memoized `date` per distinct day and the transcript scans of cache misses.
 # Choosing a session needs neither the prune nor the cache write, so a
 # failure of either (e.g. a read-only registry inside a sandbox) prints its
-# error and the picker still opens. Returns 0 on a selection, 1 when nothing
-# was selected, 2 on a selection after such a failure.
+# error and the picker still opens. An unreadable registry (a corrupt
+# meta.json, reported with the files named) is the exception: the picker
+# does not open. Returns 0 on a selection, 1 when nothing was selected or
+# the registry is unreadable, 2 on a selection after such a failure.
 _cage_resume_picker() {
     command -v gum >/dev/null 2>&1 || {
         echo -e "${RED}Error:${NC} gum is required for the session picker (https://github.com/charmbracelet/gum)" >&2
         return 1
     }
     local housekeeping_rc=0
-    cage_tidy_registry || housekeeping_rc=2
+    # An unreadable registry (rc 2, files named) stops here: the picker's own
+    # read would only fail again with the same error
+    cage_tidy_registry
+    case $? in
+        0) ;;
+        2) return 1 ;;
+        *) housekeeping_rc=2 ;;
+    esac
     local cache_file
     cache_file=$(_cage_picker_cache_path)
     local meta_rows
     meta_rows=$(cage_meta_rows '.uuid // "", .cwd // "", .name // "", .profile // "default", .start_time // ""') || return 1
-    local r_mf=() r_uuid=() r_cwd=() r_name=() r_profile=() r_start=() r_tr=()
+    local r_mf=() r_uuid=() r_name=() r_profile=() r_start=() r_tr=()
     local hidden=0 mf uuid cwd name profile start_time tr
     if [ -n "$meta_rows" ]; then
         while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd name profile start_time; do
             cage_transcript_path_var tr "$cwd" "$uuid"
             [ -f "$tr" ] || { hidden=$((hidden + 1)); continue; }
-            r_mf+=("$mf") r_uuid+=("$uuid") r_cwd+=("$cwd") r_name+=("$name")
+            r_mf+=("$mf") r_uuid+=("$uuid") r_name+=("$name")
             r_profile+=("$profile") r_start+=("$start_time") r_tr+=("$tr")
         done <<< "$meta_rows"
     fi
@@ -148,25 +197,39 @@ _cage_resume_picker() {
         done < "$cache_file"
     fi
 
+    # The cache-hit decision is made once per row; the rows the cache cannot
+    # serve (new or changed transcripts) are computed together, in one batch
+    local i
+    local -a miss_tr=() hit=()
+    local -A miss_dn miss_ctx miss_failed
+    for i in "${!r_mf[@]}"; do
+        m="${mtime_of[${r_tr[$i]}]}"
+        if [ -n "$m" ] && [ "${cache_mtime[${r_uuid[$i]}]}" = "$m" ]; then
+            hit[$i]=1
+        else
+            miss_tr+=("${r_tr[$i]}")
+        fi
+    done
+    _cage_picker_entries miss_dn miss_ctx miss_failed "${miss_tr[@]}"
+
     local today_epoch
     today_epoch=$(cage_today_epoch)
-    local rows=() cache_out=() i day_dir day_raw session_num state dn ctx when code label snippet row pad
+    local rows=() cache_out=() day_raw session_num state dn ctx when code label snippet row pad
     for i in "${!r_mf[@]}"; do
-        uuid="${r_uuid[$i]}" cwd="${r_cwd[$i]}" name="${r_name[$i]}"
+        uuid="${r_uuid[$i]}" name="${r_name[$i]}"
         m="${mtime_of[${r_tr[$i]}]}"
-        if [ -n "$m" ] && [ "${cache_mtime[$uuid]}" = "$m" ]; then
+        if [ -n "${hit[$i]}" ]; then
             dn="${cache_dn[$uuid]}" ctx="${cache_ctx[$uuid]}"
             cache_out+=("${uuid}${sep}${m}${sep}${dn}${sep}${ctx}")
-        elif _cage_picker_entry dn ctx "$cwd" "$uuid"; then
-            cache_out+=("${uuid}${sep}${m}${sep}${dn}${sep}${ctx}")
+        else
+            dn="${miss_dn[${r_tr[$i]}]}" ctx="${miss_ctx[${r_tr[$i]}]}"
+            # A failed scan (error printed) is shown but not cached, so the
+            # next open scans it again
+            [ -n "${miss_failed[${r_tr[$i]}]}" ] || cache_out+=("${uuid}${sep}${m}${sep}${dn}${sep}${ctx}")
         fi
 
-        day_dir="${r_mf[$i]%/*}"
-        day_raw="${day_dir##*/}"
-        session_num="${r_mf[$i]##*/cage_}"
-        session_num="${session_num%.meta.json}"
-        [ -n "${day_epoch[$day_raw]}" ] || day_epoch["$day_raw"]=$(date -ud "$day_raw" +%s)
-        cage_relative_code_var code "$today_epoch" "${day_epoch[$day_raw]}" "$session_num"
+        cage_meta_parts_var day_raw session_num "${r_mf[$i]}"
+        cage_day_code_var code day_epoch "$today_epoch" "$day_raw" "$session_num"
         state="FINISHED"
         cage_meta_running "${r_mf[$i]}" && state="RUNNING"
         when="${r_start[$i]:0:16}"
@@ -265,6 +328,8 @@ cage_resume() {
         picker_rc=$?
         [ "$picker_rc" -eq 1 ] && return 1
     fi
+
+    cage_handle_of_ref session "$session" || return 1
 
     local uuid=$(cage_resolve_uuid "$session")
     if [ -z "$uuid" ]; then

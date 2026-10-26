@@ -174,26 +174,61 @@ cage_get_session_file() {
     esac
 }
 
+# jq definition splitting a `grep -H` line into the file path (f) and the
+# JSON record (j). Anchored on the record's opening brace, so a ':' inside
+# the path cannot cut it short. Shared by the batch readers below.
+_CAGE_GREP_H_SPLIT_JQ='def grep_h_split: capture("^(?<f>.*?):(?<j>\\{.*)$");'
+
+# The last non-empty custom-title of each given transcript file, as
+# "<file>\t<title>" lines (files without one print nothing), in one grep and
+# one jq however many files: the batch form of cage_title_in_file, for
+# lookups over the whole registry. A grep read error fails loudly.
+# Usage: out=$(cage_titles_of "$file"...) || return 1
+cage_titles_of() {
+    [ $# -gt 0 ] || return 0
+    # Unanchored grep prefilter (the "custom-title" type VALUE anywhere in the
+    # line, so serialization/key-order changes don't break it); jq then
+    # discards false positives from conversation text
+    local -a g=(-a -H -- '"custom-title"' "$@")
+    _cage_grep_jq g -nRr "$_CAGE_GREP_H_SPLIT_JQ"'
+        reduce (inputs | grep_h_split
+                | {f, t: (.j | fromjson? | select(.type=="custom-title") | .customTitle // "")}
+                | select(.t != "")) as $x ({}; .[$x.f] = $x.t)
+        | to_entries[] | "\(.key)\t\(.value | gsub("[\t\n]"; " "))"' || {
+        echo -e "${RED}Error:${NC} cannot read the session titles (error above)" >&2
+        return 1
+    }
+}
+
 # Meta paths of every session whose current display name (the last
 # custom-title of its transcript) equals <name>, one per line. A pinned
 # session whose transcript the sweep deleted is named by its archive copy,
-# so it still resolves and the resume can restore it. Scans every
-# transcript, so it takes seconds on a large registry.
+# so it still resolves and the resume can restore it. One batched title read
+# over every transcript (cage_titles_of).
 # Usage: found=$(cage_sessions_named "$name") || return 1
 cage_sessions_named() {
     local rows
     rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // ""') || return 1
     [ -n "$rows" ] || return 0
-    local mf muuid mcwd mkeep file dn
+    local mf muuid mcwd mkeep file today titles title
+    local -a files=()
+    local -A meta_of
+    today=$(date +%Y-%m-%d)
     while IFS="$_CAGE_ROW_SEP" read -r mf muuid mcwd mkeep; do
         [ -n "$muuid" ] && [ -n "$mcwd" ] || continue
         cage_transcript_path_var file "$mcwd" "$muuid"
-        if [ ! -f "$file" ] && cage_pin_active "$mkeep"; then
+        if [ ! -f "$file" ] && cage_pin_active "$mkeep" "$today"; then
             cage_archive_path_var file "$muuid"
         fi
-        dn=$(cage_title_in_file "$file") || continue
-        [ "$dn" = "$1" ] && printf '%s\n' "$mf"
+        [ -f "$file" ] || continue
+        files+=("$file")
+        meta_of["$file"]+="$mf"$'\n'
     done <<< "$rows"
+    titles=$(cage_titles_of "${files[@]}") || return 1
+    [ -n "$titles" ] || return 0
+    while IFS=$'\t' read -r file title; do
+        [ "$title" = "$1" ] && printf '%s' "${meta_of[$file]}"
+    done <<< "$titles"
     return 0
 }
 
@@ -211,11 +246,28 @@ cage_resolve_uuid() {
     fi
 }
 
+# Resolve a /rename'd name to its absolute handle, into the named variable;
+# the other reference forms (code, handle, UUID) pass through unchanged, so
+# a relative code stays relative. A name is resolved ONCE here, since every
+# later lookup by name would read the titles of the whole registry again.
+# Usage: cage_handle_of_ref out_var "$ref" || return 1
+cage_handle_of_ref() {
+    local -n _chr_out="$1"
+    if cage_is_session_ref "$2"; then
+        _chr_out="$2"
+        return 0
+    fi
+    local _chr_meta
+    _chr_meta=$(cage_get_session_file "$2" "meta.json") || return 1
+    _chr_out=$(cage_handle_from_meta "$_chr_meta")
+}
+
 # Absolute handle for a registry meta path
 # Usage: cage_handle_from_meta ~/.local/state/cage/2026-01-05/cage_3.meta.json -> cage-2026-01-05-3
 cage_handle_from_meta() {
-    local base=$(basename "$1" .meta.json)
-    echo "cage-$(basename "$(dirname "$1")")-${base#cage_}"
+    local day num
+    cage_meta_parts_var day num "$1"
+    echo "cage-${day}-${num}"
 }
 
 # All meta.json paths across dated dirs, newest first, NUL-separated.
@@ -235,17 +287,22 @@ _CAGE_ROW_SEP=$'\x1f'
 # Project fields from every registry meta as rows separated by _CAGE_ROW_SEP
 # (first field is always the meta path; newlines and separators inside values
 # become spaces), newest first. Empty output when the registry is empty. jq
-# aborts at the first corrupt file — that failure is surfaced loudly (jq's own
-# error names the file) instead of silently dropping the sessions after it.
+# aborts at the first corrupt file, and its parse error gives only a line and
+# column, so the failure names the corrupt files itself (one jq per meta, on
+# that failure path only) instead of silently dropping the sessions after
+# it.
 # Usage: rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 1
 #        while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd; do ...; done <<< "$rows"
 cage_meta_rows() {
-    local projection="$1"
+    local prog="[input_filename, ${1}] | map(tostring | gsub(\"[\\n\\u001f]\"; \" \")) | join(\"\\u001f\")"
     local metas=() f
     while IFS= read -r -d '' f; do metas+=("$f"); done < <(cage_all_meta_files)
     [ ${#metas[@]} -eq 0 ] && return 0
-    jq -r "[input_filename, ${projection}] | map(tostring | gsub(\"[\\n\\u001f]\"; \" \")) | join(\"\\u001f\")" "${metas[@]}" || {
-        echo -e "${RED}Error:${NC} corrupt meta.json in ${CAGE_STORAGE} (see jq error above)" >&2
+    jq -r "$prog" "${metas[@]}" || {
+        echo -e "${RED}Error:${NC} corrupt meta.json in ${CAGE_STORAGE} (jq error above); unreadable:" >&2
+        for f in "${metas[@]}"; do
+            jq -r "$prog" "$f" >/dev/null 2>&1 || echo "  $f" >&2
+        done
         return 1
     }
 }
@@ -281,6 +338,27 @@ cage_relative_code_var() {
     local _crc_days
     cage_days_ago_var _crc_days "$2" "$3"
     _crc_out="s${_crc_days}-$4"
+}
+
+# The dated day and session number of a registry meta path, into the named
+# variables, by parameter expansion (no fork, for per-row loops)
+# Usage: cage_meta_parts_var day_var num_var "$meta_file"
+cage_meta_parts_var() {
+    local -n _cmp_day="$1" _cmp_num="$2"
+    local _cmp_dir="${3%/*}"
+    _cmp_day="${_cmp_dir##*/}"
+    _cmp_num="${3##*/cage_}"
+    _cmp_num="${_cmp_num%.meta.json}"
+}
+
+# Relative display code of a dated day and session number, into the named
+# variable; the day's epoch is memoized in the named associative array, so a
+# per-row loop forks date once per distinct day
+# Usage: cage_day_code_var code_var epoch_map "$today_epoch" "$day" "$num"
+cage_day_code_var() {
+    local -n _cdc_epochs="$2"
+    [ -n "${_cdc_epochs[$4]}" ] || _cdc_epochs["$4"]=$(date -ud "$4" +%s)
+    cage_relative_code_var "$1" "$3" "${_cdc_epochs[$4]}" "$5"
 }
 
 # Relative display code for a dated dir entry
@@ -384,27 +462,24 @@ cage_archive_path_var() {
     _cap_out="${CAGE_ARCHIVE}/${2}.jsonl"
 }
 
-# The LAST custom-title record in a transcript file (cage sets one at launch
-# via --name; in-session /rename appends another). Prints nothing and returns
-# 1 when the file or a title is missing.
+# The LAST non-empty custom-title record in a transcript file (cage sets one
+# at launch via --name; in-session /rename appends another), read by
+# cage_titles_of, the one definition of a session's title, so what cage
+# status shows and what cage resume <name> finds can never differ. Prints
+# nothing and returns 1 when the file or a title is missing, and 2 when the
+# scan failed (error printed).
 # Usage: cage_title_in_file "$transcript_or_archive_copy"
 cage_title_in_file() {
     [ -f "$1" ] || return 1
-    # Unanchored grep prefilter (matches the "custom-title" type VALUE anywhere
-    # in the line, so serialization/key-order changes don't break it) keeps the
-    # scan cheap on multi-MB transcripts; jq then parses only candidate lines,
-    # discarding false positives from conversation text.
-    local title
-    title=$(tac "$1" | grep -a '"custom-title"' \
-        | jq -Rr 'fromjson? | select(.type=="custom-title") | .customTitle // empty' 2>/dev/null \
-        | grep -m1 . )
-    [ -n "$title" ] || return 1
-    printf '%s\n' "$title"
+    local out
+    out=$(cage_titles_of "$1") || return 2
+    [ -n "$out" ] || return 1
+    printf '%s\n' "${out#*$'\t'}"
 }
 
 # Current display name of a session, from its transcript (see
 # cage_title_in_file). Returns 1 when transcript or title is missing —
-# callers fall back to the meta .name explicitly.
+# callers use the meta .name then — and 2 when the scan failed.
 # Usage: cage_display_name cwd uuid
 cage_display_name() {
     local transcript
@@ -421,38 +496,61 @@ cage_is_renamed() {
 }
 
 # A session's current display name (the meta .name when it has no title) and
-# whether it was /rename'd, into the named variables
+# whether it was /rename'd (true, false, or unknown when the title scan
+# failed, error printed: no caller may read that as "not renamed"), into the
+# named variables
 # Usage: cage_named_var dn_var named_var cwd uuid meta_name
 cage_named_var() {
     local -n _cnv_dn="$1" _cnv_named="$2"
-    _cnv_dn=$(cage_display_name "$3" "$4") || _cnv_dn="$5"
+    local _cnv_rc
+    _cnv_dn=$(cage_display_name "$3" "$4")
+    _cnv_rc=$?
     _cnv_named=false
-    cage_is_renamed "$_cnv_dn" "$5" && _cnv_named=true
+    if [ "$_cnv_rc" -eq 2 ]; then
+        _cnv_dn="$5" _cnv_named=unknown
+    elif [ "$_cnv_rc" -ne 0 ]; then
+        _cnv_dn="$5"
+    elif cage_is_renamed "$_cnv_dn" "$5"; then
+        _cnv_named=true
+    fi
     return 0
 }
 
-# Run a jq program (read with -n, so it consumes `inputs` itself) over the
-# lines of a transcript that mention a record type value (the grep
-# prefilter, e.g. '"user"', keeps multi-hundred-MB transcripts cheap; jq
-# still checks the type). Fails when either side fails: grep exit 2 is a
-# read error (1 = no match, and a SIGPIPE after jq stopped early, are not),
-# and jq's own status otherwise. Output is jq's.
-# Usage: out=$(_cage_jq_records '"user"' "$transcript" [jq args...] "$program") || ...
-_cage_jq_records() {
-    local pattern="$1" file="$2"
-    shift 2
-    grep -a -- "$pattern" "$file" | jq -nRr "$@"
+# Pipe grep into jq and fail when either side fails: grep exit 2 is a read
+# error (1 = no match, and a SIGPIPE after jq stopped early, are not), and
+# jq's own status otherwise. The first argument names an array holding the
+# grep arguments; the rest are jq's. Output is jq's. The one place that rule
+# lives, for every grep-prefiltered transcript scan (cage_titles_of,
+# _cage_jq_records, cage_first_prompts_of).
+# Usage: local -a g=(<grep args>); out=$(_cage_grep_jq g <jq args...>) || ...
+_cage_grep_jq() {
+    local -n _cgj_grep_args="$1"
+    shift
+    grep "${_cgj_grep_args[@]}" | jq "$@"
     local -a st=("${PIPESTATUS[@]}")
     [ "${st[0]}" -eq 2 ] && return 2
     return "${st[1]}"
 }
 
+# Run a jq program (read with -n, so it consumes `inputs` itself) over the
+# lines of a transcript that mention a record type value (the grep
+# prefilter, e.g. '"user"', keeps multi-hundred-MB transcripts cheap; jq
+# still checks the type). Fails as _cage_grep_jq does.
+# Usage: out=$(_cage_jq_records '"user"' "$transcript" [jq args...] "$program") || ...
+_cage_jq_records() {
+    local pattern="$1" file="$2"
+    shift 2
+    local -a g=(-a -- "$pattern" "$file")
+    _cage_grep_jq g -nRr "$@"
+}
+
 # jq program emitting each real user prompt from a transcript, one per line
 # (isMeta records, command noise, tool_result-only messages and
-# [Request interrupted…] markers are skipped; newlines collapsed). Used only
-# by cage_prompt_summary, which every prompt consumer reads; the resume
-# picker's cache key hashes it, so editing it invalidates that cache by
-# itself.
+# [Request interrupted…] markers are skipped; newlines collapsed): the one
+# definition of a real prompt. Run by cage_prompt_summary_of_file (one
+# transcript; every per-session reader goes through it) and
+# cage_first_prompts_of (the picker's batch); the resume picker's cache key
+# hashes it, so editing it invalidates that cache by itself.
 _CAGE_PROMPT_JQ='fromjson?
     | select(.type=="user" and (.isMeta != true))
     | .message.content
@@ -461,20 +559,22 @@ _CAGE_PROMPT_JQ='fromjson?
     | select(startswith("[Request interrupted")|not)
     | gsub("[\\n\\t]+"; " ")'
 
-# First prompt and prompt count (capped at <cap>) in one scan: the one place
-# prompts are extracted, read by every prompt consumer. A grep prefilter on
-# the "user" type value hands jq only candidate lines, which keeps
+# First prompt and prompt count (capped at <cap>) of one transcript file in
+# one scan: the per-file prompt extractor, which every per-session reader
+# goes through (cage_prompt_summary, cage_session_context, and the picker's
+# exact scan of a file the batch could not settle). A grep prefilter on the
+# "user" type value hands jq only candidate lines, which keeps
 # multi-hundred-MB transcripts fast; jq still decides what a real prompt is.
-# Prints "<count>\t<first prompt>"; returns 1 when the scan failed (error
-# printed), so a broken scan never reads as "no prompts".
-# Usage: out=$(cage_prompt_summary "$cwd" "$uuid" 10) || ...
+# A missing file has no prompts. Prints "<count>\t<first prompt>"; returns 1
+# when the scan failed (error printed), so a broken scan never reads as "no
+# prompts".
+# Usage: out=$(cage_prompt_summary_of_file "$transcript" 10) || ...
 #        IFS=$'\t' read -r count first <<< "$out"
-cage_prompt_summary() {
-    local transcript out prompts=()
-    cage_transcript_path_var transcript "$1" "$2"
-    if [ -f "$transcript" ]; then
-        out=$(_cage_jq_records '"user"' "$transcript" --argjson n "$3" "limit(\$n; inputs | $_CAGE_PROMPT_JQ)") || {
-            echo -e "${RED}Error:${NC} cannot read the prompts of $transcript (error above)" >&2
+cage_prompt_summary_of_file() {
+    local out prompts=()
+    if [ -f "$1" ]; then
+        out=$(_cage_jq_records '"user"' "$1" --argjson n "$2" "limit(\$n; inputs | $_CAGE_PROMPT_JQ)") || {
+            echo -e "${RED}Error:${NC} cannot read the prompts of $1 (error above)" >&2
             return 1
         }
         [ -n "$out" ] && mapfile -t prompts <<< "$out"
@@ -482,10 +582,40 @@ cage_prompt_summary() {
     printf '%s\t%s\n' "${#prompts[@]}" "${prompts[0]-}"
 }
 
+# The same for a session given by cwd and uuid
+# Usage: out=$(cage_prompt_summary "$cwd" "$uuid" 10) || ...
+cage_prompt_summary() {
+    local transcript
+    cage_transcript_path_var transcript "$1" "$2"
+    cage_prompt_summary_of_file "$transcript" "$3"
+}
+
+# The first real prompt of each given transcript file, as "<file>\t<prompt>"
+# lines, in one grep and one jq however many files: the batch form of
+# cage_prompt_summary_of_file, for the resume picker's cache misses. grep
+# stops after the first 20 "user" lines of each file, where the first prompt
+# nearly always is; a file without one there prints nothing, and the caller
+# (_cage_picker_entries) runs cage_prompt_summary_of_file on it, so the
+# result is exact. A grep read error fails loudly.
+# Usage: out=$(cage_first_prompts_of "$file"...) || return 1
+cage_first_prompts_of() {
+    [ $# -gt 0 ] || return 0
+    local -a g=(-a -H -m 20 -- '"user"' "$@")
+    _cage_grep_jq g -nRr "$_CAGE_GREP_H_SPLIT_JQ"'
+        reduce (inputs | grep_h_split
+                | {f, p: (.j | '"$_CAGE_PROMPT_JQ"')}) as $x
+               ({}; if has($x.f) then . else .[$x.f] = $x.p end)
+        | to_entries[] | "\(.key)\t\(.value)"' || {
+        echo -e "${RED}Error:${NC} cannot read the session prompts (error above)" >&2
+        return 1
+    }
+}
+
 # One-line "what was this session about" snippet: the first real user prompt.
 # Prints nothing and returns 1 when the transcript or a prompt is missing —
 # callers skip the line — and 2 when the scan failed (error printed). Reads
-# cage_prompt_summary, the one place that extracts prompts.
+# cage_prompt_summary (which runs cage_prompt_summary_of_file, the per-file
+# prompt extractor).
 # Usage: cage_session_context cwd uuid
 cage_session_context() {
     local _csc_out _csc_count _csc_first
@@ -584,8 +714,9 @@ cage_has_nontext_input() {
 # Listings hide these by default, and the close menu defaults to Delete for
 # them when close_default is auto. Called with 3 arguments it scans; a
 # caller that already holds the facts passes all three so nothing is
-# recomputed: the first prompt, whether the session is /rename'd (true|false,
-# or empty to look it up only if needed) and the prompt count (exact up to
+# recomputed: the first prompt, whether the session is /rename'd (true,
+# false or unknown as cage_named_var sets it, or empty to look it up only if
+# needed) and the prompt count (exact up to
 # at least short_max_prompts + 1).
 # Usage: cage_is_near_empty cwd uuid meta_file [first named count]
 cage_is_near_empty() {
@@ -603,12 +734,13 @@ cage_is_near_empty() {
     [ "${#first}" -gt "$CFG_SHORT_PROMPT_MAX_CHARS" ] && return 1
     [ "$count" -le "$CFG_SHORT_MAX_PROMPTS" ] || return 1
     # a /rename'd session was deliberately labeled — never debris, whatever
-    # its prompts. Looked up only now, for the few rows still in question.
+    # its prompts; nor is one whose title scan failed. Looked up only now,
+    # for the few rows still in question.
     if [ -z "$named" ]; then
         local dn
         cage_named_var dn named "$cwd" "$uuid" "$(jq -r '.name // ""' "$meta_file" 2>/dev/null)"
     fi
-    [ "$named" = true ] && return 1
+    [ "$named" = false ] || return 1
     # Pasted markup or images make a session real whatever its text prompts
     # (a short caption under a screenshot); a failed check counts as input
     cage_has_nontext_input "$cwd" "$uuid"
@@ -681,10 +813,12 @@ cage_delete_session() {
     cage_remove_session_row "$meta_file" "$uuid"
 }
 
-# True while a keep_until date (YYYY-MM-DD, from meta) has not passed
-# Usage: cage_pin_active "$keep_until"
+# True while a keep_until date (YYYY-MM-DD, from meta) has not passed. A
+# per-row loop passes today's date once computed, to spare a date fork per
+# row.
+# Usage: cage_pin_active "$keep_until" [today]
 cage_pin_active() {
-    [ -n "$1" ] && [[ ! $1 < $(date +%Y-%m-%d) ]]
+    [ -n "$1" ] && [[ ! $1 < ${2:-$(date +%Y-%m-%d)} ]]
 }
 
 # Copy a session's transcript (and its subagent dir) into the archive, so a
@@ -989,11 +1123,14 @@ cage_meta_running() {
 # rows. A row whose project dir does not exist
 # at all is also spared: that points at a slug cage computed wrongly rather
 # than a purged transcript, and an unconfirmed delete must not rest on it.
-# Prints one notice per kind of change.
-# Usage: cage_tidy_registry || return 1
+# Prints one notice per kind of change. Returns 1 when a restore or prune
+# failed (the registry is still readable, so a listing can go on), and 2
+# when the registry itself could not be read (a corrupt meta.json, already
+# reported with the files named): a listing after it would only fail again.
+# Usage: cage_tidy_registry; case $? in ...
 cage_tidy_registry() {
     local rows
-    rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // ""') || return 1
+    rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // ""') || return 2
     [ -n "$rows" ] || return 0
     local today pruned=0 restored=0 unrestorable=0 mf uuid cwd keep_until day_dir base transcript
     today=$(date +%Y-%m-%d)
@@ -1002,7 +1139,7 @@ cage_tidy_registry() {
         [ -f "$transcript" ] && continue
         # A failed restore (error printed) is counted, not fatal: one broken
         # pin must not stop the other rows from being restored or pruned
-        if cage_pin_active "$keep_until"; then
+        if cage_pin_active "$keep_until" "$today"; then
             if cage_restore_transcript "$cwd" "$uuid"; then
                 restored=$((restored + 1))
             else

@@ -151,7 +151,8 @@ The listing first restores the transcripts of pinned sessions that Claude
 Code's retention deleted, and prunes rows that can never be resumed (no
 transcript left); today's, RUNNING and background log/result rows are kept.
 A failure there is reported and makes the command exit non-zero, but the
-sessions are still listed.
+sessions are still listed. A corrupt meta.json is the exception: it stops
+the listing too, with an error that names the file.
 EOF
                 return 0
                 ;;
@@ -202,15 +203,10 @@ EOF
                 _cage_status_list "$arg"
                 return
             fi
-        # Anything else non-numeric: a /rename'd display name — resolution
-        # (and the loud not-found error) happens in cage_get_session_file.
-        # Resolve ONCE to the absolute handle: passing the raw name down would
-        # re-run the full transcript scan for every per-file lookup in
-        # _cage_status_single.
+        # Anything else non-numeric: a /rename'd display name, resolved once
+        # to its handle (and the loud not-found error) by cage_handle_of_ref
         elif [[ ! $arg =~ ^[0-9]+$ ]]; then
-            local meta
-            meta=$(cage_get_session_file "$arg" "meta.json") || return 1
-            resolved=$(cage_handle_from_meta "$meta")
+            cage_handle_of_ref resolved "$arg" || return 1
         fi
 
         if [ -n "$resolved" ]; then
@@ -230,51 +226,53 @@ _cage_status_list() {
 
     # The listing does not depend on the prune: a failed prune (e.g. a
     # read-only registry inside a sandbox) keeps its error on stderr and the
-    # non-zero exit, but the sessions are still listed
+    # non-zero exit, but the sessions are still listed. A corrupt meta.json
+    # (rc 2, already reported with the files named) stops here: the listing
+    # would only fail again on the same file.
     local prune_rc=0
-    cage_tidy_registry || prune_rc=1
+    cage_tidy_registry
+    case $? in
+        0) ;;
+        2) return 1 ;;
+        *) prune_rc=1 ;;
+    esac
 
-    # Scan all meta.json files sorted by modification time (newest first)
-    local meta_files=()
-    while IFS= read -r -d '' file; do
-        meta_files+=("$file")
-    done < <(cage_all_meta_files)
+    # Every meta in one batched jq, newest first. The registry holds hundreds
+    # of rows, so the loop below forks nothing for a row past the limit or
+    # filtered out by profile, and only what it must for the others (a row
+    # hidden as near-empty still needs its scans). Path parts come by
+    # parameter expansion and the day epoch is memoized per day, as in the
+    # resume picker.
+    local meta_rows
+    meta_rows=$(cage_meta_rows '.uuid // "", .name // "", .cwd // "", .profile // "default", .start_time // "", .task // ""') || return 1
 
     # Split into running and finished
     local running_entries=() finished_entries=()
-    local count=0
+    local count=0 today_epoch meta_file uuid name cwd profile start_time task
+    local session_num day_dir day_raw pid_file session_id time log_file status_file
+    local -A day_epoch
+    today_epoch=$(cage_today_epoch)
 
-    for meta_file in "${meta_files[@]}"; do
-        [ -f "$meta_file" ] || continue
-        local session_num=$(basename "$meta_file" .meta.json | sed 's/cage_//')
-        local day_dir=$(dirname "$meta_file")
-        local day_raw=$(basename "$day_dir")
-        local pid_file="${day_dir}/cage_${session_num}.pid"
+    while IFS="$_CAGE_ROW_SEP" read -r meta_file uuid name cwd profile start_time task; do
+        [ -n "$meta_file" ] || continue
+        day_dir="${meta_file%/*}"
+        cage_meta_parts_var day_raw session_num "$meta_file"
+        pid_file="${day_dir}/cage_${session_num}.pid"
 
         # Quick check: if no pid file and we already have enough finished, skip
         if [ ! -f "$pid_file" ] && [ $count -ge $max_logs ]; then
             continue
         fi
 
-        local session_id=$(cage_relative_code "$day_raw" "$session_num")
-
-        local uuid="" name="" cwd="" profile="" start_time="" task=""
-        eval "$(jq -r '
-            "uuid=" + (.uuid // "" | @sh) + " " +
-            "name=" + (.name // "" | @sh) + " " +
-            "cwd=" + (.cwd // "" | @sh) + " " +
-            "profile=" + (.profile // "default" | @sh) + " " +
-            "start_time=" + (.start_time // "" | @sh) + " " +
-            "task=" + (.task // "" | @sh)
-        ' "$meta_file" 2>/dev/null)"
-
         [ -n "$profile_filter" ] && [ "$profile" != "$profile_filter" ] && continue
 
-        local time="${start_time:0:19}"; time="${time/T/ }"
+        cage_day_code_var session_id day_epoch "$today_epoch" "$day_raw" "$session_num"
+
+        time="${start_time:0:19}"; time="${time/T/ }"
         [ -z "$time" ] && time=$(stat -c '%y' "$meta_file" 2>/dev/null | cut -d'.' -f1)
 
-        local log_file="${day_dir}/cage_${session_num}.log"
-        local status_file="${day_dir}/cage_${session_num}.status"
+        log_file="${day_dir}/cage_${session_num}.log"
+        status_file="${day_dir}/cage_${session_num}.status"
 
         cage_resolve_status "$pid_file" "$status_file" "$log_file"
         # Identifying context: the task, else the first prompt typed. One scan
@@ -314,7 +312,7 @@ _cage_status_list() {
                 ((count++))
             fi
         fi
-    done
+    done <<< "$meta_rows"
 
     echo -e "${BOLD}${PURPLE}=== Active Sessions ===${NC}"
     if [ ${#running_entries[@]} -eq 0 ]; then
