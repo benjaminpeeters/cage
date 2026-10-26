@@ -219,25 +219,31 @@ cage_new() {
         cage_interactive_start "$pid_file"
         trap 'cage_interactive_end "$pid_file"' EXIT
         trap 'cage_interactive_end "$pid_file"; trap - INT; kill -INT $$' INT TERM
-        # Transcripts written from here on may continue this conversation
-        # (see cage_follow_session); a second earlier covers clock granularity
-        local launch_epoch=$(( $(date +%s) - 1 ))
+        # A hang-up (tab or window closed) would kill this shell before the
+        # status write and the follow below: the trap only sets a flag, bash
+        # waits for claude to exit, then goes on, and the close menu keeps the
+        # session without asking (nobody can answer). Never `trap '' HUP`:
+        # claude would inherit the ignore.
+        _cage_hup=false
+        trap '_cage_hup=true' HUP
         (cd "$work_dir" && claude --session-id "$uuid" --name "$session_name" --model "$model" --effort "$effort" --allowedTools "$tools" "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}" "${task_args[@]}")
         local _exit_code=$?
         # Shell colors for the close menu; the pid file and the traps stay
         # until it is done (see cage_interactive_start)
         cage_interactive_colors_off
         echo "$_exit_code" > "$status_file"
+        [ "$_cage_hup" = true ] && cage_event "$session_name" hang-up "claude exited $_exit_code"
         # Empty = Claude never answered and nothing was typed or pasted (see
         # cage_has_user_input); anything else gets the close menu. Transcript
         # existence stopped being the signal: claude writes the file at launch
         # for the --name title record even when the session is closed
         # immediately.
-        # Claude Code may have moved the conversation to a new session id
-        # (cage_follow_session); every step below must act on the new one. A
-        # failed follow (error printed) counts as a failed check: keep all.
+        # Claude Code may have moved the conversation to a new session id (a
+        # background hand-off, cage_follow_session); every step below must
+        # act on the new one. A failed follow (error printed) counts as a
+        # failed check: keep all.
         local input_rc close_rc followed
-        if followed=$(cage_follow_session "$meta_file" "$work_dir" "$uuid" "$launch_epoch"); then
+        if followed=$(cage_follow_session "$meta_file" "$work_dir" "$uuid"); then
             uuid="$followed"
             cage_has_user_input "$work_dir" "$uuid"
             input_rc=$?
@@ -245,7 +251,7 @@ cage_new() {
             input_rc=2
         fi
         if [ "$input_rc" -eq 0 ]; then
-            cage_close_session "$work_dir" "$uuid" "$meta_file" "$session_name"
+            cage_close_session "$work_dir" "$uuid" "$meta_file" "$session_name" "$_cage_hup"
             close_rc=$?
         elif [ "$input_rc" -eq 1 ]; then
             # Nothing to keep: removed everywhere, without asking
@@ -260,7 +266,7 @@ cage_new() {
             # The check failed (error printed): keep everything, decide nothing
             close_rc=1
         fi
-        trap - EXIT INT TERM
+        trap - EXIT INT TERM HUP
         cage_interactive_end "$pid_file"
         case $close_rc in
             0) cage_print_resume_hint "$session_name" ;;

@@ -147,9 +147,11 @@ Options:
 Rows show identifying context: the /rename'd name when set, else the
 session's task or the first prompt typed into it.
 
-The listing first restores the transcripts of pinned sessions that Claude
-Code's retention deleted, and prunes rows that can never be resumed (no
-transcript left); today's, RUNNING and background log/result rows are kept.
+The listing first follows sessions Claude Code moved to a new session id
+(a background hand-off), restores the transcripts of pinned sessions that
+Claude Code's retention deleted, and prunes rows that can never be resumed
+(no transcript left); today's, RUNNING and background log/result rows are
+kept.
 A failure there is reported and makes the command exit non-zero, but the
 sessions are still listed. A corrupt meta.json is the exception: it stops
 the listing too, with an error that names the file.
@@ -191,7 +193,19 @@ EOF
 
     # If argument looks like a session identifier, show single session
     if [ -n "$arg" ]; then
-        local resolved=""
+        local resolved="" follow_rc=0
+        # Rows Claude Code moved are followed before a reference resolves: a
+        # /rename'd name and the new session id live in the new transcript
+        # (the listing's tidy does the same). A failed follow (error printed)
+        # makes the exit non-zero after the session is shown.
+        if [[ ! $arg =~ ^[0-9]+$ ]]; then
+            cage_follow_moved_sessions
+            case $? in
+                0) ;;
+                2) return 1 ;;
+                *) follow_rc=1 ;;
+            esac
+        fi
         # s<n>-<n> or cage-YYYY-MM-DD-N or UUID
         if cage_is_session_ref "$arg"; then
             resolved="$arg"
@@ -210,8 +224,8 @@ EOF
         fi
 
         if [ -n "$resolved" ]; then
-            _cage_status_single "$resolved"
-            return
+            _cage_status_single "$resolved" || return 1
+            return $follow_rc
         fi
     fi
 

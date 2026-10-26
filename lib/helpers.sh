@@ -23,6 +23,21 @@ CAGE_ARCHIVE="${CAGE_STORAGE}/archive"
 # User settings (tracked copy: ~/MEGA/config/dotfiles/config/cage/config.json,
 # linked by config-sync)
 CAGE_CONFIG="${HOME}/.config/cage/config.json"
+# Append-only record of what cage did to rows on its own (follows, hang-ups),
+# readable after the terminal that printed it is gone
+CAGE_EVENTS="${CAGE_STORAGE}/events.log"
+# Claude Code's record of each live claude process: <pid>.json holding its
+# pid and sessionId
+CAGE_CLAUDE_SESSIONS="${HOME}/.claude/sessions"
+
+# Append one line to the event log: time, session handle, event, detail.
+# A failed write warns: the log is a diagnostic, and the change it records
+# has already happened.
+# Usage: cage_event "$handle" event "detail"
+cage_event() {
+    printf '%s\t%s\t%s\t%s\n' "$(date -Iseconds)" "$1" "$2" "${3//[$'\t\n']/ }" >> "$CAGE_EVENTS" 2>/dev/null \
+        || echo -e "${YELLOW}Warning:${NC} cannot write the event log: $CAGE_EVENTS" >&2
+}
 
 # Load and validate the user settings. Every key is required and no other is
 # allowed: a missing file, a missing or unknown key or an invalid value is an
@@ -125,12 +140,19 @@ cage_get_session_file() {
     elif [[ $session =~ $_CAGE_HANDLE_RE ]]; then
         target_date=${BASH_REMATCH[1]}
         session_num=${BASH_REMATCH[2]}
-    # UUID format: search meta.json files for matching uuid
+    # UUID format: the row holding it now or before Claude Code moved the
+    # conversation (cage_rows_holding_uuid)
     elif [[ $session =~ $_CAGE_UUID_RE ]]; then
         local meta_file
-        meta_file=$(grep -l "\"uuid\": \"$session\"" "${CAGE_STORAGE}"/*/*.meta.json < /dev/null 2>/dev/null | head -1)
+        meta_file=$(cage_rows_holding_uuid "$session") || return 1
         if [ -z "$meta_file" ]; then
             echo "No session found for UUID: $session" >&2
+            return 1
+        fi
+        if [[ $meta_file == *$'\n'* ]]; then
+            echo "UUID $session is held by several sessions:" >&2
+            local m
+            while IFS= read -r m; do echo "  $(cage_handle_from_meta "$m")" >&2; done <<< "$meta_file"
             return 1
         fi
         # Extract date and number from meta file path
@@ -232,6 +254,33 @@ cage_sessions_named() {
     return 0
 }
 
+# Meta paths of every registry row holding session <uuid>, one per line: as
+# its uuid, or among the ids it held before Claude Code moved the
+# conversation (previous_uuids). A fork row's parent_uuid does not count.
+# The one rule for which row an id belongs to (UUID references and the
+# follow's ownership check). grep narrows the files and jq decides; a grep
+# or jq failure is an error naming the unreadable files.
+# Usage: holders=$(cage_rows_holding_uuid "$uuid") || return 1
+cage_rows_holding_uuid() {
+    local -a metas=() cands=()
+    local f found
+    while IFS= read -r -d '' f; do metas+=("$f"); done < <(cage_all_meta_files)
+    [ ${#metas[@]} -gt 0 ] || return 0
+    found=$(grep -l -F -- "\"$1\"" "${metas[@]}")
+    case $? in
+        0) ;;
+        1) return 0 ;;
+        *) echo -e "${RED}Error:${NC} cannot read the registry metas in ${CAGE_STORAGE} (grep error above)" >&2
+           return 1 ;;
+    esac
+    mapfile -t cands <<< "$found"
+    jq -r --arg u "$1" 'select(.uuid == $u or ((.previous_uuids // []) | index($u))) | input_filename' \
+        -- "${cands[@]}" || {
+        _cage_report_corrupt_metas "${cands[@]}"
+        return 1
+    }
+}
+
 # Resolve a session reference to its UUID
 # Usage: cage_resolve_uuid "s0-1" -> 351f41fe-ac51-4cfd-8e4f-a8105e0adf8a
 cage_resolve_uuid() {
@@ -284,13 +333,26 @@ cage_all_meta_files() {
 # to the left.
 _CAGE_ROW_SEP=$'\x1f'
 
+# Report the corrupt metas among <meta>... after a batch jq over them failed:
+# jq's own parse error gives only a line and column, so each file is checked
+# again (on that failure path only) and every one that is not a JSON object
+# is named. The one corrupt-meta report (cage_meta_rows,
+# cage_rows_holding_uuid).
+# Usage: jq ... "${metas[@]}" || { _cage_report_corrupt_metas "${metas[@]}"; return 1; }
+_cage_report_corrupt_metas() {
+    echo -e "${RED}Error:${NC} corrupt meta.json in ${CAGE_STORAGE} (jq error above); unreadable:" >&2
+    local f
+    for f; do
+        jq -e 'type == "object"' -- "$f" > /dev/null 2>&1 || echo "  $f" >&2
+    done
+}
+
 # Project fields from every registry meta as rows separated by _CAGE_ROW_SEP
 # (first field is always the meta path; newlines and separators inside values
 # become spaces), newest first. Empty output when the registry is empty. jq
-# aborts at the first corrupt file, and its parse error gives only a line and
-# column, so the failure names the corrupt files itself (one jq per meta, on
-# that failure path only) instead of silently dropping the sessions after
-# it.
+# aborts at the first corrupt file; the failure names the corrupt files
+# (_cage_report_corrupt_metas) instead of silently dropping the sessions
+# after it.
 # Usage: rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 1
 #        while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd; do ...; done <<< "$rows"
 cage_meta_rows() {
@@ -299,10 +361,7 @@ cage_meta_rows() {
     while IFS= read -r -d '' f; do metas+=("$f"); done < <(cage_all_meta_files)
     [ ${#metas[@]} -eq 0 ] && return 0
     jq -r "$prog" "${metas[@]}" || {
-        echo -e "${RED}Error:${NC} corrupt meta.json in ${CAGE_STORAGE} (jq error above); unreadable:" >&2
-        for f in "${metas[@]}"; do
-            jq -r "$prog" "$f" >/dev/null 2>&1 || echo "  $f" >&2
-        done
+        _cage_report_corrupt_metas "${metas[@]}"
         return 1
     }
 }
@@ -548,9 +607,11 @@ _cage_jq_records() {
 # (isMeta records, command noise, tool_result-only messages and
 # [Request interrupted…] markers are skipped; newlines collapsed): the one
 # definition of a real prompt. Run by cage_prompt_summary_of_file (one
-# transcript; every per-session reader goes through it) and
-# cage_first_prompts_of (the picker's batch); the resume picker's cache key
-# hashes it, so editing it invalidates that cache by itself.
+# transcript; every per-session reader goes through it),
+# cage_first_prompts_of (the picker's batch) and _CAGE_CONTINUED_JQ (a prompt
+# after a continued-in record makes the stub live again, so editing this
+# rule also changes which moved sessions are followed); the resume picker's
+# cache key hashes it, so editing it invalidates that cache by itself.
 _CAGE_PROMPT_JQ='fromjson?
     | select(.type=="user" and (.isMeta != true))
     | .message.content
@@ -805,8 +866,14 @@ cage_delete_session() {
         echo -e "${RED}Error:${NC} cannot read previous ids from $meta_file" >&2
         return 1
     }
+    # Every id is checked before anything is removed: a claude still open on
+    # one of them (e.g. the worker a background hand-off started) would go on
+    # writing a transcript that no longer exists
     for id in "$uuid" $previous; do
         cage_require_uuid "$id" || return 1
+        cage_refuse_if_live "cannot delete $(cage_handle_from_meta "$meta_file")" "$id" || return 1
+    done
+    for id in "$uuid" $previous; do
         cage_transcript_path_var transcript "$cwd" "$id"
         rm -rf -- "$transcript" "${transcript%.jsonl}" || return 1
     done
@@ -888,82 +955,201 @@ cage_meta_set() {
     cage_meta_jq "$1" --arg k "$2" --arg v "$3" '.[$k] = $v'
 }
 
-# The record uuids of a transcript, in order, at most <limit>
-# Usage: ids=$(_cage_record_ids "$transcript" "$limit") || return 1
-_cage_record_ids() {
-    jq -nRr --argjson n "$2" 'limit($n; inputs | fromjson? | objects | select(.uuid) | .uuid)' "$1"
-}
+# How much of a transcript's end cage_continuation_of reads: the
+# continued-in record is followed only by a few KB of bookkeeping
+_CAGE_CONTINUED_WINDOW=1048576
+# How much of each registered transcript's end cage_follow_moved_sessions
+# scans for candidates (a miss leaves the row as it is, never misfollows it)
+_CAGE_MOVED_SCAN_BYTES=65536
 
-# Claude Code can move a running conversation to a new session id: it writes
-# a new transcript in the same project dir holding every record of the old
-# one (same record uuids, rewritten under the new session id) and continues
-# there. Seen on a mid-session auto-update (2.1.308 -> 2.1.309, cage issue
-# #3); /branch does the same. Prints the uuid of the transcript written since
-# <since_epoch> that continues <uuid>, or nothing. A candidate counts only
-# when its records start with exactly all of the old transcript's records
-# and go on past them, so another session in the same directory, or a mere
-# copy, never matches.
-# Usage: next=$(cage_continuation_of cwd uuid since_epoch) || return 1
+# jq program over a transcript's last lines, newest first (read with -n):
+# the target id of the last continued-in record when no completed turn
+# follows it, else nothing; MALFORMED when that record names no target (a
+# missing, empty or non-string id), which cage_continuation_of rejects
+# loudly. A completed turn is an assistant reply that finished (a string
+# stop_reason, not an API error) or a real prompt (_CAGE_PROMPT_JQ). The
+# same test Claude Code's /resume uses to hide a superseded session: a stub
+# resumed and typed into after the move is a live conversation again.
+_CAGE_CONTINUED_JQ='first(inputs | . as $line | fromjson? | objects
+        | if .type == "continued-in"
+          then (.continuedInSessionId | if type == "string" and . != "" then . else "MALFORMED" end)
+          elif .type == "assistant" and (.message.stop_reason | type) == "string"
+               and .isApiErrorMessage != true then ""
+          elif ([$line | '"$_CAGE_PROMPT_JQ"'] | length) > 0 then ""
+          else empty end)
+    | select(. != "")'
+
+# Claude Code moves a conversation to a new session id when it is handed to
+# the background (`←` on an empty prompt, /background, Ctrl+B mid-turn): a
+# worker continues it in a new transcript in the same project dir, and the
+# old transcript, now a stub, gets a continued-in record naming the new id.
+# /branch, /fork and --fork-session write no such record (the original stays
+# a conversation of its own), so they are never followed. Prints the id
+# <uuid> continues in, or nothing: no record in the last
+# _CAGE_CONTINUED_WINDOW bytes, a completed turn after it
+# (_CAGE_CONTINUED_JQ), or a target transcript that was never written or
+# holds no record (a worker that did not start). Returns 1 on a read
+# failure, and on a record whose target is missing, empty, not a UUID or
+# the session's own id (error printed), which never reads as "not moved".
+# Usage: next=$(cage_continuation_of cwd uuid) || return 1
 cage_continuation_of() {
-    local transcript cand old_ids n first
+    local transcript last id="" next target
     cage_transcript_path_var transcript "$1" "$2"
     [ -f "$transcript" ] || return 0
-    # Oldest first: after two switches both later transcripts continue this
-    # one, and taking the nearest keeps the chain hop by hop, so every
-    # intermediate id is recorded (and later deleted with the session)
-    local -a cands=()
-    mapfile -t cands < <(find "${transcript%/*}" -maxdepth 1 -name '*.jsonl' ! -name "$2.jsonl" \
-        -newermt "@$3" -printf '%T@\t%p\n' | sort -n | cut -f2)
-    [ ${#cands[@]} -gt 0 ] || return 0
-    local fail="cannot read the records of a transcript in ${transcript%/*} (jq error above)"
-    first=$(_cage_record_ids "$transcript" 1) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
-    [ -n "$first" ] || return 0
-    local cand_ids
-    for cand in "${cands[@]}"; do
-        # The first record settles nearly every candidate (other sessions
-        # sharing the directory); only a match pays for the full read
-        cand_ids=$(_cage_record_ids "$cand" 1) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
-        [ "$cand_ids" = "$first" ] || continue
-        if [ -z "$old_ids" ]; then
-            old_ids=$(_cage_record_ids "$transcript" 1000000000) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
-            n=$(wc -l <<< "$old_ids")
-        fi
-        cand_ids=$(_cage_record_ids "$cand" $(( n + 1 ))) || { echo -e "${RED}Error:${NC} $fail" >&2; return 1; }
-        [ "$(wc -l <<< "$cand_ids")" -gt "$n" ] || continue
-        [ "${cand_ids%$'\n'*}" = "$old_ids" ] || continue
-        cand="${cand##*/}"
-        printf '%s\n' "${cand%.jsonl}"
+    # Streamed, never held in a shell variable (bash is slow on a MB string).
+    # grep settles the common cases cheaply: no record at all, or a last
+    # record naming a worker that never wrote its transcript (such a stub
+    # stays a candidate of every listing). The record's own match comes
+    # before its id's, so a last line that is the record itself means it
+    # names no id: jq then reports it as malformed.
+    last=$(tail -c "$_CAGE_CONTINUED_WINDOW" -- "$transcript" \
+        | grep -a -o -e '"continued-in"' -e '"continuedInSessionId":[^,}]*' | tail -n 1
+        exit "${PIPESTATUS[0]}") || {
+        echo -e "${RED}Error:${NC} cannot read $transcript" >&2
+        return 1
+    }
+    [ -n "$last" ] || return 0
+    [[ $last =~ ^\"continuedInSessionId\":\"([^\"]*)\"$ ]] && id="${BASH_REMATCH[1]}"
+    if [[ $id =~ $_CAGE_UUID_RE ]] && [ ! -f "${transcript%/*}/${id}.jsonl" ]; then
         return 0
-    done
-    return 0
+    fi
+    next=$(tail -c "$_CAGE_CONTINUED_WINDOW" -- "$transcript" | tac | jq -nRr "$_CAGE_CONTINUED_JQ") || {
+        echo -e "${RED}Error:${NC} cannot read the records of $transcript (jq error above)" >&2
+        return 1
+    }
+    [ -n "$next" ] || return 0
+    if ! [[ $next =~ $_CAGE_UUID_RE ]] || [ "$next" = "$2" ]; then
+        echo -e "${RED}Error:${NC} $transcript has a malformed continued-in record (target '$next')" >&2
+        return 1
+    fi
+    target="${transcript%/*}/${next}.jsonl"
+    [ -f "$target" ] || return 0
+    grep -q -m1 -F '"parentUuid":' -- "$target"
+    case $? in
+        0) printf '%s\n' "$next" ;;
+        1) ;;
+        *) echo -e "${RED}Error:${NC} cannot read $target" >&2; return 1 ;;
+    esac
+}
+
+# Report a follow failure on the terminal and in the event log
+# Usage: _cage_follow_failed "$handle" "message"; return 1
+_cage_follow_failed() {
+    echo -e "${RED}Error:${NC} cannot follow $1: $2" >&2
+    cage_event "$1" follow-failed "$2"
 }
 
 # Follow a session to the transcript Claude Code continued it in (see
-# cage_continuation_of), hop by hop: the meta gets the new uuid and keeps the
-# old ones in previous_uuids, and a pin's archive copy moves along so the
-# pin stays continuous. Prints the final uuid (the same one when nothing
-# moved); one notice per hop goes to stderr.
-# Usage: uuid=$(cage_follow_session "$meta_file" "$cwd" "$uuid" "$since_epoch") || return 1
+# cage_continuation_of), hop by hop. Each hop keeps the old id in
+# previous_uuids and rewrites the meta only while its uuid is still the one
+# followed from, so two follows at once cannot record a hop twice. A pinned
+# row's archive copy is replaced by a copy of the new transcript (the old
+# copy holds only the stub). Refused, with the error printed and logged: a
+# pointer back into the row's own history or at another row's session
+# (either would merge two conversations into one row), and a chain of more
+# than 10 hops. Prints the final uuid (the same one when nothing moved); each
+# hop is announced on stderr and recorded in the event log.
+# Usage: uuid=$(cage_follow_session "$meta_file" "$cwd" "$uuid") || return 1
 cage_follow_session() {
-    local meta_file="$1" cwd="$2" uuid="$3" since="$4" next old_copy new_copy
+    local meta_file="$1" cwd="$2" uuid="$3" next hops=0 handle holders mf old_copy mtime
+    handle=$(cage_handle_from_meta "$meta_file")
     while :; do
-        next=$(cage_continuation_of "$cwd" "$uuid" "$since") || return 1
+        next=$(cage_continuation_of "$cwd" "$uuid") || {
+            _cage_follow_failed "$handle" "cannot read the transcript of $uuid (error above)"
+            return 1
+        }
         [ -n "$next" ] || break
-        cage_require_uuid "$next" || return 1
-        cage_meta_jq "$meta_file" --arg n "$next" \
-            '.previous_uuids = ((.previous_uuids // []) + [.uuid]) | .uuid = $n' || return 1
-        cage_archive_path_var old_copy "$uuid"
-        cage_archive_path_var new_copy "$next"
-        if [ -f "$old_copy" ]; then
-            mv -- "$old_copy" "$new_copy" || return 1
-            if [ -d "${old_copy%.jsonl}" ]; then
-                rm -rf -- "${new_copy%.jsonl}" && mv -- "${old_copy%.jsonl}" "${new_copy%.jsonl}" || return 1
-            fi
+        hops=$((hops + 1))
+        if [ "$hops" -gt 10 ]; then
+            _cage_follow_failed "$handle" "more than 10 hops from $3"
+            return 1
         fi
-        echo -e "${DIM}Claude Code continued this conversation as session ${next}; cage follows it (previous id ${uuid} kept in the meta).${NC}" >&2
+        holders=$(cage_rows_holding_uuid "$next") || {
+            _cage_follow_failed "$handle" "the registry is unreadable (error above)"
+            return 1
+        }
+        while IFS= read -r mf; do
+            [ -n "$mf" ] && [ "$mf" != "$meta_file" ] || continue
+            _cage_follow_failed "$handle" "$uuid continues in $next, which belongs to $(cage_handle_from_meta "$mf")"
+            return 1
+        done <<< "$holders"
+        # This row's own state is decided by the swap, in one read: already
+        # at <next> (a follow that ran meanwhile; nothing changes), <next>
+        # among its previous ids (the pointer leads back into its own
+        # history), or moved elsewhere meanwhile. The meta's mtime orders the
+        # listings by activity; a follow is bookkeeping, so the row keeps its
+        # place.
+        mtime=$(stat -c %Y -- "$meta_file") \
+            && cage_meta_jq "$meta_file" --arg o "$uuid" --arg n "$next" '
+            if .uuid == $n then .
+            elif ((.previous_uuids // []) | index($n)) then error("\($o) points back to its earlier id \($n)")
+            elif .uuid != $o then error("the row moved to \(.uuid) meanwhile")
+            else .previous_uuids = ((.previous_uuids // []) + [.uuid]) | .uuid = $n end' \
+            && touch -d "@$mtime" -- "$meta_file" || {
+            _cage_follow_failed "$handle" "the meta was not updated for $uuid -> $next (reason above)"
+            return 1
+        }
+        cage_archive_path_var old_copy "$uuid"
+        if [ -f "$old_copy" ]; then
+            cage_archive_transcript "$cwd" "$next" && rm -rf -- "$old_copy" "${old_copy%.jsonl}" || {
+                _cage_follow_failed "$handle" "cannot move the pin's archive copy to $next (error above)"
+                return 1
+            }
+        fi
+        echo -e "${DIM}Claude Code continued ${handle} as session ${next}; cage follows it (previous id ${uuid} kept in the meta).${NC}" >&2
+        cage_event "$handle" followed "$uuid -> $next"
         uuid="$next"
     done
     printf '%s\n' "$uuid"
+}
+
+# Follow every registry row Claude Code moved to a new session id (see
+# cage_follow_session), so a command reads each row's current conversation:
+# its /rename'd name, its prompts, the transcript a resume must open. One
+# tail over the last _CAGE_MOVED_SCAN_BYTES of every registered transcript
+# finds the candidates, and only those get the exact check; a candidate the
+# window misses keeps its row as it is, it never makes a wrong follow.
+# RUNNING rows are skipped: an interactive one is followed by its wrapper
+# when claude exits, a -p job's row by the next call after the job ended.
+# Returns 0, 1 when a follow failed (error printed and logged) or a
+# transcript could not be read (printed, not logged: no row is named), with
+# the registry still readable, and 2 when the registry is unreadable (the
+# files are named).
+# Usage: cage_follow_moved_sessions; case $? in ...
+cage_follow_moved_sessions() {
+    local rows
+    rows=$(cage_meta_rows '.uuid // "", .cwd // ""') || return 2
+    [ -n "$rows" ] || return 0
+    local mf uuid cwd t hits hit tail_rc failed=0
+    local -a files=()
+    local -A row_of
+    while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd; do
+        [ -n "$uuid" ] && [ -n "$cwd" ] || continue
+        cage_transcript_path_var t "$cwd" "$uuid"
+        [ -f "$t" ] || continue
+        files+=("$t")
+        row_of["$t"]="${mf}${_CAGE_ROW_SEP}${cwd}${_CAGE_ROW_SEP}${uuid}"
+    done <<< "$rows"
+    [ ${#files[@]} -gt 0 ] || return 0
+    # tail -v heads each file's chunk with "==> path <=="; a hit belongs to
+    # the last header seen
+    hits=$(tail -v -c "$_CAGE_MOVED_SCAN_BYTES" -- "${files[@]}" | awk '
+        /^==> .* <==$/ { f = substr($0, 5, length($0) - 8); next }
+        f != "" && index($0, "\"continued-in\"") { print f; f = "" }'
+        exit "${PIPESTATUS[0]}")
+    tail_rc=$?
+    if [ "$tail_rc" -ne 0 ]; then
+        echo -e "${RED}Error:${NC} cannot read every registered transcript (tail error above); moved sessions among them are not followed" >&2
+        failed=1
+    fi
+    [ -n "$hits" ] || return $failed
+    while IFS= read -r hit; do
+        [ -n "${row_of[$hit]}" ] || continue
+        IFS="$_CAGE_ROW_SEP" read -r mf cwd uuid <<< "${row_of[$hit]}"
+        cage_meta_running "$mf" && continue
+        cage_follow_session "$mf" "$cwd" "$uuid" > /dev/null || failed=1
+    done <<< "$hits"
+    return $failed
 }
 
 # Pin a session ("Keep long"): keep_until = today + pin_days (cage settings),
@@ -1013,12 +1199,13 @@ cage_name_session() {
 # transcript still exists), per the cage settings close_ask and
 # close_default: Keep, Keep long (pin), Name and keep, Name and keep long, or
 # Delete. Naming implies keeping, so it ends the menu. Without a terminal on
-# stdin nobody can answer, so the session is kept. A pinned session's archive
-# is refreshed whenever it is kept. Returns 0 when kept, 10 when deleted, 1 on
+# stdin, or after a hang-up (<hup> true: the wrapper's HUP trap fired),
+# nobody can answer, so the session is kept. A pinned session's archive is
+# refreshed whenever it is kept. Returns 0 when kept, 10 when deleted, 1 on
 # a failure (error printed).
-# Usage: cage_close_session "$cwd" "$uuid" "$meta_file" "$session_name"
+# Usage: cage_close_session "$cwd" "$uuid" "$meta_file" "$session_name" "$hup"
 cage_close_session() {
-    local cwd="$1" uuid="$2" meta_file="$3" session_name="$4"
+    local cwd="$1" uuid="$2" meta_file="$3" session_name="$4" hup="$5"
     local name keep_until dn named pinned=false fields
     # Checked: on an unreadable meta, empty name and keep_until would make
     # the session look named and unpinned
@@ -1030,7 +1217,9 @@ cage_close_session() {
     cage_named_var dn named "$cwd" "$uuid" "$name"
     cage_pin_active "$keep_until" && pinned=true
 
-    if [ "$CFG_CLOSE_ASK" = never ] || { [ "$CFG_CLOSE_ASK" = unless-named ] && [ "$named" = true ]; } || [ ! -t 0 ]; then
+    # Nobody can answer without a terminal on stdin, nor after a hang-up
+    if [ "$CFG_CLOSE_ASK" = never ] || { [ "$CFG_CLOSE_ASK" = unless-named ] && [ "$named" = true ]; } \
+        || [ ! -t 0 ] || [ "$hup" = true ]; then
         if [ "$pinned" = true ]; then cage_archive_transcript "$cwd" "$uuid" || return 1; fi
         return 0
     fi
@@ -1123,15 +1312,24 @@ cage_meta_running() {
 # rows. A row whose project dir does not exist
 # at all is also spared: that points at a slug cage computed wrongly rather
 # than a purged transcript, and an unconfirmed delete must not rest on it.
-# Prints one notice per kind of change. Returns 1 when a restore or prune
-# failed (the registry is still readable, so a listing can go on), and 2
-# when the registry itself could not be read (a corrupt meta.json, already
+# Rows Claude Code moved to a new session id are followed first
+# (cage_follow_moved_sessions), so the restore and prune below, and the
+# listing after them, act on each row's current conversation.
+# Prints one notice per kind of change. Returns 1 when a follow, restore or
+# prune failed (the registry is still readable, so a listing can go on), and
+# 2 when the registry itself could not be read (a corrupt meta.json, already
 # reported with the files named): a listing after it would only fail again.
 # Usage: cage_tidy_registry; case $? in ...
 cage_tidy_registry() {
-    local rows
+    local rows follow_rc=0
+    cage_follow_moved_sessions
+    case $? in
+        0) ;;
+        2) return 2 ;;
+        *) follow_rc=1 ;;
+    esac
     rows=$(cage_meta_rows '.uuid // "", .cwd // "", .keep_until // ""') || return 2
-    [ -n "$rows" ] || return 0
+    [ -n "$rows" ] || return $follow_rc
     local today pruned=0 restored=0 unrestorable=0 mf uuid cwd keep_until day_dir base transcript
     today=$(date +%Y-%m-%d)
     while IFS="$_CAGE_ROW_SEP" read -r mf uuid cwd keep_until; do
@@ -1169,7 +1367,7 @@ cage_tidy_registry() {
         echo -e "${RED}Error:${NC} ${unrestorable} pinned session(s) could not be restored (errors above)" >&2
         return 1
     fi
-    return 0
+    return $follow_rc
 }
 
 # Claude Code's transcript retention in days (cleanupPeriodDays; 30 is the
@@ -1265,6 +1463,79 @@ cage_get_pid() {
     fi
 }
 
+# The pid of a live claude process holding session <uuid>, from Claude Code's
+# own records of its processes: it sees a claude started outside cage
+# (claude -r, a background worker), which cage's pid files cannot. A record
+# counts only while its process lives and is still the one that wrote it
+# (same start time), so a crashed claude's leftover record never blocks.
+# Prints the pid and returns 0 when one is alive, returns 1 when none is, 2
+# when a record cannot be read (the files are listed). Inside a sandbox with
+# its own pid namespace no host process is visible, so nothing reads as
+# alive there.
+# Usage: pid=$(cage_live_claude_pid "$uuid"); case $? in ...
+cage_live_claude_pid() {
+    local -a recs=("$CAGE_CLAUDE_SESSIONS"/*.json)
+    [ -e "${recs[0]}" ] || return 1
+    local prog='select(.sessionId == $u and .pid != null) | "\(.pid) \(.procStart // "")"' pids pid
+    if ! pids=$(jq -r --arg u "$1" "$prog" -- "${recs[@]}" 2> /dev/null); then
+        # A record can vanish between the glob and the read (its claude
+        # exited): read each one again, skip the vanished ones, and name
+        # those still unreadable
+        local f out bad=()
+        pids=""
+        for f in "${recs[@]}"; do
+            [ -e "$f" ] || continue
+            if out=$(jq -r --arg u "$1" "$prog" -- "$f" 2> /dev/null); then
+                pids+="$out"$'\n'
+            else
+                bad+=("$f")
+            fi
+        done
+        if [ ${#bad[@]} -gt 0 ]; then
+            echo -e "${RED}Error:${NC} unreadable Claude Code session record(s):" >&2
+            printf '  %s\n' "${bad[@]}" >&2
+            return 2
+        fi
+    fi
+    local start stat
+    local -a fields
+    while read -r pid start; do
+        [ -n "$pid" ] || continue
+        kill -0 "$pid" 2> /dev/null || continue
+        # A crashed claude leaves its record behind, and its pid can be
+        # reused: procStart is the process start time (field 22 of
+        # /proc/<pid>/stat, checked against every live record 2026-10-26),
+        # so another start time means another process. A record without
+        # it needs at least a process named claude.
+        if [ -n "$start" ]; then
+            stat=$(cat -- "/proc/$pid/stat" 2> /dev/null) || continue
+            # Fields after the parenthesized name, which may hold spaces:
+            # field 22 is the 20th of them
+            read -ra fields <<< "${stat##*) }"
+            [ "${fields[19]}" = "$start" ] || continue
+        else
+            [ "$(cat -- "/proc/$pid/comm" 2> /dev/null)" = claude ] || continue
+        fi
+        printf '%s\n' "$pid"
+        return 0
+    done <<< "$pids"
+    return 1
+}
+
+# Refuse when a live claude holds session <uuid> (cage_live_claude_pid), and
+# when that cannot be told
+# Usage: cage_refuse_if_live "$what_is_refused" "$uuid" || return 1
+cage_refuse_if_live() {
+    local pid
+    pid=$(cage_live_claude_pid "$2")
+    case $? in
+        1) return 0 ;;
+        0) echo -e "${RED}Error:${NC} $1: session $2 is open in a running claude (PID $pid) — close that claude first" >&2 ;;
+        *) echo -e "${RED}Error:${NC} $1: cannot tell whether a claude holds session $2 (unreadable records listed above)" >&2 ;;
+    esac
+    return 1
+}
+
 # Refuse to act on a RUNNING session: a second claude on the same transcript
 # corrupts turn ordering, and the resume paths would clobber its pid file.
 # (kill -0 based, so a crashed session with a leftover pid file still passes.)
@@ -1305,18 +1576,20 @@ cage_require_transcript() {
 # Load and validate a session's meta for resuming: parse the fields, verify
 # name/cwd presence, and run the resume guards (running-session refusal, cwd
 # recreation, restoring a pinned session's transcript from the archive when
-# the sweep deleted it, transcript existence). Sets globals: _cage_meta_file,
-# _cage_name (the canonical absolute handle — callers should replace their
-# user-typed reference with it, since relative codes shift at midnight),
-# _cage_profile, _cage_cwd, _cage_model, _cage_effort, _cage_tools,
-# _cage_sys_prompt, and the array _cage_plugin_dirs (each checked to still
-# exist).
+# the sweep deleted it, following a move Claude Code made, refusal when a
+# claude outside cage holds the conversation, transcript existence). Sets
+# globals: _cage_meta_file, _cage_name (the canonical absolute handle —
+# callers should replace their user-typed reference with it, since relative
+# codes shift at midnight), _cage_resume_uuid (the session id to resume:
+# <uuid>, or the one the conversation moved to), _cage_profile, _cage_cwd,
+# _cage_model, _cage_effort, _cage_tools, _cage_sys_prompt, and the array
+# _cage_plugin_dirs (each checked to still exist).
 # Usage: cage_load_resume_meta "$session" "$uuid" || return 1
 cage_load_resume_meta() {
     local session="$1" uuid="$2"
     _cage_meta_file=$(cage_get_session_file "$session" "meta.json")
     _cage_name="" _cage_profile="" _cage_cwd="" _cage_model=""
-    _cage_effort="" _cage_tools="" _cage_sys_prompt=""
+    _cage_effort="" _cage_tools="" _cage_sys_prompt="" _cage_resume_uuid=""
     local keep_until=""
     _cage_plugin_dirs=()
     if [ ! -f "$_cage_meta_file" ]; then
@@ -1356,7 +1629,15 @@ cage_load_resume_meta() {
         cage_restore_transcript "$_cage_cwd" "$uuid" || return 1
         echo -e "${DIM}Restored the pinned transcript of $_cage_name from ${CAGE_ARCHIVE}${NC}" >&2
     fi
-    cage_require_transcript "$_cage_name" "$_cage_cwd" "$uuid" || return 1
+    # Never resume a stub: a resume would reopen the conversation as it was
+    # before the move, and anything typed there splits it in two. A failed
+    # follow (error printed) refuses rather than guessing.
+    _cage_resume_uuid=$(cage_follow_session "$_cage_meta_file" "$_cage_cwd" "$uuid") || {
+        echo -e "${RED}Error:${NC} cannot tell whether Claude Code moved $_cage_name to a new session id — not resuming" >&2
+        return 1
+    }
+    cage_refuse_if_live "cannot resume $_cage_name" "$_cage_resume_uuid" || return 1
+    cage_require_transcript "$_cage_name" "$_cage_cwd" "$_cage_resume_uuid" || return 1
 }
 
 # Validate a profile's sandbox block (compact JSON string).

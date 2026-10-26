@@ -117,15 +117,34 @@ session is kept, with an error), gets the close menu:
 
 Esc keeps the session. Without a terminal on stdin nothing is asked.
 
-Claude Code sometimes moves a running conversation to a new session id: it
-copies the transcript under the new id and continues there (seen on a
-mid-session auto-update; `/branch` does the same). Before the close menu,
-cage looks for a transcript written during the session that starts with
-exactly all of this session's records and goes on past them, and follows
-it: the row gets the new id (the old ones are kept as `previous_uuids` in
-its meta, and Delete removes their transcripts too), and a pin's archive
-copy moves along. A `/clear` starts a fresh conversation without copying
-the old one, so it is not followed. Background `-p` jobs are not followed.
+Claude Code moves a conversation to a new session id when you hand it to the
+background (`←` on an empty prompt, `/background`, Ctrl+B mid-turn): a
+worker continues it in a new transcript, and the old one gets a
+`continued-in` record naming the new id. cage follows that record: the row
+gets the new id (the old ones are kept as `previous_uuids` in its meta, an
+old id still resolves to the row, and Delete removes their transcripts
+too), and a pin's archive copy is replaced by a copy of the new transcript.
+It follows when an interactive session closes, and again whenever one of
+these commands runs: `cage status`, the picker, `cage resume`, and
+`cage clean` except with `--dry-run`; so a move missed at exit is caught by
+the next of them. A RUNNING interactive row is followed by its own cage
+when claude exits; a `-p` job's row is followed by the next of those
+commands after the job has ended. A stub that was resumed and typed into
+after the move is a conversation of its own again and is not followed, and
+neither are `/branch`, `/fork` and `--fork-session` (they write no such
+record) or `/clear`.
+
+cage also reads Claude Code's own records of live claude processes
+(`~/.claude/sessions/`): `cage resume` and Delete refuse a conversation that
+a claude started outside cage still holds open, such as the background
+worker itself.
+
+When the terminal closes while an interactive session runs, cage waits for
+claude to exit, writes the exit code, follows the session and keeps it
+without asking (an empty `cage new` session is still removed). Follows,
+follow failures and such hang-ups are recorded in
+`~/.local/state/cage/events.log` (time, handle, event, detail), so they can
+be read after the terminal is gone.
 
 ### Settings
 

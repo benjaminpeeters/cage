@@ -22,7 +22,13 @@ Modes (bare `cage clean` opens a gum menu):
 
 Options:
   --dry-run           Show what would be removed without touching anything
+                      (moved sessions are not followed first, so a moved
+                      row is judged by the stub it left behind)
   -h, --help          Show this help
+
+Every mode first follows sessions Claude Code moved to a new session id (a
+background hand-off), so a row is judged by its current conversation; if a
+follow fails, nothing is cleaned.
 
 RUNNING sessions and pinned ones (Keep long, pin not expired) are never
 removed; delete a pinned session from its close menu. A pinned session that
@@ -113,6 +119,18 @@ cage_clean() {
     # gum widgets erase themselves — echo every choice for the record
     echo -e "${DIM}Mode:${NC} ${mode}${days:+ (older than ${days} days)}"
     echo -e "${DIM}Scanning registry…${NC}"
+
+    # Rows Claude Code moved to a new session id are followed first, so every
+    # mode judges a row by its current conversation, not by the stub the move
+    # left behind. A failed follow (error printed) stops the clean: rows
+    # would be removed on facts cage could not settle. A dry run touches
+    # nothing, so it skips the follow and judges moved rows by their stubs.
+    if [ "$dry_run" = false ]; then
+        cage_follow_moved_sessions || {
+            echo -e "${RED}Error:${NC} not cleaning: following moved sessions failed (error above)" >&2
+            return 1
+        }
+    fi
 
     # One batched jq for all rows (a per-row jq trio makes large registries
     # feel hung, especially before the pick selector appears)

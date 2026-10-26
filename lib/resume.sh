@@ -13,10 +13,13 @@ Arguments:
   session    Session reference: s0-3, cage-2026-01-05-1, a UUID, or a
              /rename'd display name (quote names containing spaces).
              With no argument, opens an interactive picker of every
-             resumable session; it first restores the transcripts of
-             pinned sessions that Claude Code's retention deleted, and
-             prunes rows that can never be resumed (today's, RUNNING and
-             background log/result rows are kept).
+             resumable session; it first follows sessions Claude Code
+             moved to a new session id (a background hand-off), restores
+             the transcripts of pinned sessions that Claude Code's
+             retention deleted, and prunes rows that can never be resumed
+             (today's, RUNNING and background log/result rows are kept).
+             A session moved that way always resumes in its new id, and
+             one a claude outside cage holds open is refused.
 
 When an interactive resume ends, the close menu offers Keep, Keep long
 (pin), Name and keep / Name and keep long, or Delete, as after cage new.
@@ -282,7 +285,7 @@ cage_resume() {
     local fork_mode=false
     local tail_mode=false
     local md_mode=false
-    local picker_rc=0
+    local housekeeping_rc=0
 
     # Parse options with GNU getopt
     local opts
@@ -322,11 +325,24 @@ cage_resume() {
             echo -e "${RED}Error:${NC} -p requires an explicit session" >&2
             return 1
         fi
-        # 2 = a session was picked but the picker's prune or cache write
-        # failed (error already printed): resume anyway, exit non-zero after
+        # 2 = a session was picked but the picker's follow, prune or cache
+        # write failed (error already printed): resume anyway, exit non-zero
+        # after
         session=$(_cage_resume_picker)
-        picker_rc=$?
-        [ "$picker_rc" -eq 1 ] && return 1
+        housekeeping_rc=$?
+        [ "$housekeeping_rc" -eq 1 ] && return 1
+    else
+        # Rows Claude Code moved are followed before the reference resolves:
+        # a /rename'd name and the new session id live in the new transcript
+        # (the picker's tidy does the same). A failed follow of another row
+        # (error printed) does not stop this resume; this row is checked
+        # again, strictly, by cage_load_resume_meta.
+        cage_follow_moved_sessions
+        case $? in
+            0) ;;
+            2) return 1 ;;
+            *) housekeeping_rc=2 ;;
+        esac
     fi
 
     cage_handle_of_ref session "$session" || return 1
@@ -341,6 +357,7 @@ cage_resume() {
     # Mode 1: Interactive (no prompt)
     if [ -z "$prompt" ]; then
         cage_load_resume_meta "$session" "$uuid" || return 1
+        uuid="$_cage_resume_uuid"
         local meta_file="$_cage_meta_file"
         local session_name="$_cage_name" profile="$_cage_profile" orig_cwd="$_cage_cwd"
         local orig_model="$_cage_model" orig_effort="$_cage_effort" orig_tools="$_cage_tools" orig_sys_prompt="$_cage_sys_prompt"
@@ -380,9 +397,11 @@ cage_resume() {
         cage_interactive_start "$resume_pid_file"
         trap 'cage_interactive_end "$resume_pid_file"' EXIT
         trap 'cage_interactive_end "$resume_pid_file"; trap - INT; kill -INT $$' INT TERM
-        # Transcripts written from here on may continue this conversation
-        # (see cage_follow_session); a second earlier covers clock granularity
-        local launch_epoch=$(( $(date +%s) - 1 ))
+        # A hang-up (tab or window closed) only sets a flag, so the status
+        # write and the follow below still run once claude has exited (see
+        # new.sh). Never `trap '' HUP`: claude would inherit the ignore.
+        _cage_hup=false
+        trap '_cage_hup=true' HUP
         (cd "$orig_cwd" && claude --resume "$uuid" ${orig_model:+--model "$orig_model"} ${orig_effort:+--effort "$orig_effort"} ${orig_tools:+--allowedTools "$orig_tools"} "${settings_args[@]}" "${sysprompt_args[@]}" "${plugin_args[@]}")
         local _exit_code=$?
         # Shell colors for the close menu; the pid file and the traps stay
@@ -390,26 +409,28 @@ cage_resume() {
         cage_interactive_colors_off
         local status_file=$(cage_get_session_file "$session" "status")
         echo "$_exit_code" > "$status_file"
-        # claude's own failure wins; otherwise a picker failure surfaces here
+        [ "$_cage_hup" = true ] && cage_event "$session_name" hang-up "claude exited $_exit_code"
+        # claude's own failure wins; otherwise a housekeeping failure surfaces
+        # here
         local final_rc=$_exit_code
-        [ "$final_rc" -eq 0 ] && final_rc=$picker_rc
+        [ "$final_rc" -eq 0 ] && final_rc=$housekeeping_rc
         # Same close menu as a fresh session (keep, pin, name, delete), on the
         # session id Claude Code ended with (cage_follow_session). The
         # transcript was verified before launch; if it disappeared during the
         # session, or the follow failed (error printed), the menu would decide
         # on facts it cannot read, so it is skipped and everything is kept
         local close_rc followed
-        if ! followed=$(cage_follow_session "$meta_file" "$orig_cwd" "$uuid" "$launch_epoch"); then
+        if ! followed=$(cage_follow_session "$meta_file" "$orig_cwd" "$uuid"); then
             echo -e "${RED}Error:${NC} cannot tell whether Claude Code moved $session to a new session id — registry files kept, close menu skipped" >&2
             close_rc=1
         elif uuid="$followed"; cage_has_conversation "$orig_cwd" "$uuid"; then
-            cage_close_session "$orig_cwd" "$uuid" "$meta_file" "$session_name"
+            cage_close_session "$orig_cwd" "$uuid" "$meta_file" "$session_name" "$_cage_hup"
             close_rc=$?
         else
             echo -e "${RED}Error:${NC} transcript for $session disappeared during the session — registry files kept, close menu skipped" >&2
             close_rc=1
         fi
-        trap - EXIT INT TERM
+        trap - EXIT INT TERM HUP
         cage_interactive_end "$resume_pid_file"
         case $close_rc in
             0) cage_print_resume_hint "$session_name" ;;
@@ -421,6 +442,7 @@ cage_resume() {
 
     # Mode 2: Non-interactive with prompt
     cage_load_resume_meta "$session" "$uuid" || return 1
+    uuid="$_cage_resume_uuid"
     local meta_file="$_cage_meta_file"
     local orig_name="$_cage_name" orig_cwd="$_cage_cwd" orig_profile="$_cage_profile"
     local orig_tools="$_cage_tools" orig_model="$_cage_model" orig_effort="$_cage_effort" orig_sys_prompt="$_cage_sys_prompt"
@@ -647,4 +669,5 @@ WRAPPER_EOF
         source "$CAGE_ROOT/lib/tail.sh"
         cage_tail "$job_session"
     fi
+    return $housekeeping_rc
 }
